@@ -2,6 +2,8 @@
 
 默认服务地址：`http://127.0.0.1:8014`
 
+默认 ASR：`tencent`（`engine_model_type=16k_zh`，`res_text_format=3`）
+
 ## 1. 健康检查
 
 ```bash
@@ -21,6 +23,17 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
   -H 'Content-Type: application/json' \
   -d '{
     "url": "https://example.com/demo.mp3"
+  }'
+```
+
+腾讯云模式（覆盖默认模式）：
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.mp3",
+    "asr_provider": "tencent",
+    "raw": true
   }'
 ```
 
@@ -71,6 +84,13 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 - `ocr_api_key`：AI OCR key
 - `raw`：`true` 时返回原始结构
 - `audio_chunk_seconds`：音频分段秒数；`0` 为不分段（默认）
+- `asr_provider`：`local|tencent`，默认读取 `transcribe_config.json`（当前默认 `tencent`）
+- `tencent_secret_id` / `tencent_secret_key`：单次请求覆盖腾讯云密钥
+- `tencent_region`：默认 `ap-beijing`
+- `tencent_engine_model_type`：默认 `16k_zh`
+- `tencent_res_text_format`：当前默认 `3`
+- `tencent_quality_mode`：`standard|max`，默认 `standard`
+- `tencent_filter_modal`：当前默认 `1`
 
 ## 5. 一键冒烟测试脚本
 

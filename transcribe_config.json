@@ -1,0 +1,22 @@
+{
+  "asr": {
+    "default_provider": "tencent",
+    "tencent": {
+      "secret_id": "",
+      "secret_key": "",
+      "region": "ap-beijing",
+      "engine_model_type": "16k_zh",
+      "channel_num": 1,
+      "res_text_format": 3,
+      "quality_mode": "standard",
+      "hotword_id": "",
+      "hotword_list": "",
+      "convert_num_mode": 1,
+      "filter_modal": 1,
+      "filter_punc": 0,
+      "filter_dirty": 0,
+      "poll_interval_seconds": 2,
+      "poll_timeout_seconds": 600
+    }
+  }
+}

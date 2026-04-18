@@ -3,6 +3,9 @@
 """Single-file tool for transcribing one URL or running an HTTP service."""
 
 import argparse
+import datetime
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -49,6 +52,55 @@ DEFAULT_PID_FILE = SCRIPT_DIR / 'transcribe_http_to_text.pid'
 DEFAULT_LOG_FILE = SCRIPT_DIR / 'transcribe_http_to_text.log'
 DEFAULT_AI_OCR_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
 DEFAULT_AI_OCR_MODEL = 'gpt-4o-mini'
+DEFAULT_CONFIG_FILE = SCRIPT_DIR / 'transcribe_config.json'
+TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
+TENCENT_ASR_VERSION = '2019-06-14'
+
+
+def _deep_update(dst: dict, src: dict) -> dict:
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            _deep_update(dst[key], value)
+        else:
+            dst[key] = value
+    return dst
+
+
+def _load_runtime_config(path: Path) -> dict:
+    defaults = {
+        'asr': {
+            'default_provider': 'tencent',
+            'tencent': {
+                'secret_id': '',
+                'secret_key': '',
+                'region': 'ap-beijing',
+                'engine_model_type': '16k_zh',
+                'channel_num': 1,
+                'res_text_format': 3,
+                'quality_mode': 'standard',
+                'hotword_id': '',
+                'hotword_list': '',
+                'convert_num_mode': 1,
+                'filter_modal': 1,
+                'filter_punc': 0,
+                'filter_dirty': 0,
+                'poll_interval_seconds': 2,
+                'poll_timeout_seconds': 600,
+            },
+        },
+    }
+    if not path.exists():
+        return defaults
+    try:
+        loaded = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(loaded, dict):
+            return _deep_update(defaults, loaded)
+    except Exception:
+        pass
+    return defaults
+
+
+RUNTIME_CONFIG = _load_runtime_config(DEFAULT_CONFIG_FILE)
 
 AUDIO_EXTS = {
     '.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg', '.opus', '.amr', '.mp4',
@@ -188,6 +240,196 @@ def to_simplified_chinese(text: str) -> str:
         return zhconv.convert(text, 'zh-cn')
     except Exception:
         return text
+
+
+def _tc3_sign(secret_key: str, date: str, service: str, string_to_sign: str) -> str:
+    def sign(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+    secret_date = sign(('TC3' + secret_key).encode('utf-8'), date)
+    secret_service = sign(secret_date, service)
+    secret_signing = sign(secret_service, 'tc3_request')
+    return hmac.new(secret_signing, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+
+
+def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key: str,
+                         region: str) -> dict:
+    service = 'asr'
+    host = 'asr.tencentcloudapi.com'
+    content_type = 'application/json; charset=utf-8'
+    timestamp = int(time.time())
+    date = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).strftime('%Y-%m-%d')
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    hashed_payload = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
+
+    canonical_headers = (
+        f'content-type:{content_type}\n'
+        f'host:{host}\n'
+        f'x-tc-action:{action.lower()}\n'
+    )
+    signed_headers = 'content-type;host;x-tc-action'
+    canonical_request = (
+        'POST\n'
+        '/\n'
+        '\n'
+        f'{canonical_headers}\n'
+        f'{signed_headers}\n'
+        f'{hashed_payload}'
+    )
+
+    credential_scope = f'{date}/{service}/tc3_request'
+    string_to_sign = (
+        'TC3-HMAC-SHA256\n'
+        f'{timestamp}\n'
+        f'{credential_scope}\n'
+        f'{hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()}'
+    )
+    signature = _tc3_sign(secret_key, date, service, string_to_sign)
+    authorization = (
+        'TC3-HMAC-SHA256 '
+        f'Credential={secret_id}/{credential_scope}, '
+        f'SignedHeaders={signed_headers}, '
+        f'Signature={signature}'
+    )
+
+    req = Request(
+        TENCENT_ASR_ENDPOINT,
+        data=payload_json.encode('utf-8'),
+        method='POST',
+    )
+    req.add_header('Authorization', authorization)
+    req.add_header('Content-Type', content_type)
+    req.add_header('Host', host)
+    req.add_header('X-TC-Action', action)
+    req.add_header('X-TC-Version', TENCENT_ASR_VERSION)
+    req.add_header('X-TC-Timestamp', str(timestamp))
+    req.add_header('X-TC-Region', region)
+
+    with urlopen(req, timeout=60) as response:
+        body = response.read().decode('utf-8')
+    parsed = json.loads(body)
+    resp = parsed.get('Response', {})
+    if 'Error' in resp:
+        err = resp.get('Error') or {}
+        code = err.get('Code', 'UnknownError')
+        msg = err.get('Message', '')
+        raise RuntimeError(f'{code}: {msg}')
+    return parsed
+
+
+def transcribe_with_tencent(url: str,
+                            language: str | None,
+                            tencent_secret_id: str,
+                            tencent_secret_key: str,
+                            tencent_region: str,
+                            tencent_engine_model_type: str,
+                            tencent_channel_num: int,
+                            tencent_res_text_format: int,
+                            tencent_quality_mode: str,
+                            tencent_hotword_id: str,
+                            tencent_hotword_list: str,
+                            tencent_convert_num_mode: int,
+                            tencent_filter_modal: int,
+                            tencent_filter_punc: int,
+                            tencent_filter_dirty: int,
+                            tencent_poll_interval: int,
+                            tencent_poll_timeout: int) -> Dict:
+    if not tencent_secret_id or not tencent_secret_key:
+        raise RuntimeError('Tencent ASR credentials missing: set tencent.secret_id / tencent.secret_key')
+
+    quality_mode = (tencent_quality_mode or 'standard').strip().lower()
+    engine_model_type = tencent_engine_model_type
+    res_text_format = int(tencent_res_text_format)
+    convert_num_mode = int(tencent_convert_num_mode)
+    filter_modal = int(tencent_filter_modal)
+    filter_punc = int(tencent_filter_punc)
+    filter_dirty = int(tencent_filter_dirty)
+    hotword_id = (tencent_hotword_id or '').strip()
+    hotword_list = (tencent_hotword_list or '').strip()
+    if quality_mode == 'max':
+        # Prefer large model + rich formatted output for better readability/accuracy.
+        if engine_model_type == '16k_zh':
+            engine_model_type = '16k_zh_large'
+        if res_text_format < 3:
+            res_text_format = 3
+        convert_num_mode = 1
+        filter_modal = max(filter_modal, 1)
+
+    create_payload = {
+        'EngineModelType': engine_model_type,
+        'ChannelNum': int(tencent_channel_num),
+        'ResTextFormat': res_text_format,
+        'SourceType': 0,
+        'Url': url,
+        'ConvertNumMode': convert_num_mode,
+        'FilterModal': filter_modal,
+        'FilterPunc': filter_punc,
+        'FilterDirty': filter_dirty,
+    }
+    if hotword_id:
+        create_payload['HotwordId'] = hotword_id
+    if hotword_list:
+        create_payload['HotwordList'] = hotword_list
+    create_resp = _tencent_api_request(
+        action='CreateRecTask',
+        payload=create_payload,
+        secret_id=tencent_secret_id,
+        secret_key=tencent_secret_key,
+        region=tencent_region,
+    )
+    task_id = (((create_resp.get('Response') or {}).get('Data') or {}).get('TaskId'))
+    if not task_id:
+        raise RuntimeError('Tencent ASR create task failed: missing TaskId')
+
+    start = time.time()
+    poll_interval = max(1, int(tencent_poll_interval))
+    timeout_sec = max(10, int(tencent_poll_timeout))
+
+    while True:
+        if time.time() - start > timeout_sec:
+            raise RuntimeError(f'Tencent ASR polling timeout ({timeout_sec}s), task_id={task_id}')
+
+        status_resp = _tencent_api_request(
+            action='DescribeTaskStatus',
+            payload={'TaskId': int(task_id)},
+            secret_id=tencent_secret_id,
+            secret_key=tencent_secret_key,
+            region=tencent_region,
+        )
+        data = ((status_resp.get('Response') or {}).get('Data') or {})
+        status_str = str(data.get('StatusStr') or '').lower()
+        status_code = int(data.get('Status') or 0)
+        if status_str == 'success' or status_code == 2:
+            text = str(data.get('Result') or '').strip()
+            if not text:
+                details = data.get('ResultDetail') or []
+                lines = []
+                for item in details:
+                    one = str((item or {}).get('FinalSentence') or '').strip()
+                    if one:
+                        lines.append(one)
+                text = '\n'.join(lines).strip()
+            text = to_simplified_chinese(text)
+            return {
+                'url': url,
+                'status': 'ok',
+                'task': 'audio',
+                'text': text,
+                'language': language or data.get('LangType') or 'zh',
+                'duration': None,
+                'engine': 'tencent-asr',
+                'model': engine_model_type,
+                'model_path': None,
+                'audio_chunk_seconds': 0,
+                'chunk_count': 1,
+                'tencent_task_id': int(task_id),
+                'tencent_quality_mode': quality_mode,
+                'tencent_res_text_format': res_text_format,
+            }
+        if status_str == 'failed' or status_code == 3:
+            err_msg = str(data.get('ErrorMsg') or 'Tencent ASR task failed')
+            raise RuntimeError(err_msg)
+        time.sleep(poll_interval)
 
 
 def detect_task(url: str, content_type: str, explicit_task: str, local_path: Path) -> Literal['audio', 'image']:
@@ -449,6 +691,22 @@ def transcribe_url(url: str,
                    beam_size: int,
                    temperature: float,
                    audio_chunk_seconds: int,
+                   asr_provider: str,
+                   tencent_secret_id: str,
+                   tencent_secret_key: str,
+                   tencent_region: str,
+                   tencent_engine_model_type: str,
+                   tencent_channel_num: int,
+                   tencent_res_text_format: int,
+                   tencent_quality_mode: str,
+                   tencent_hotword_id: str,
+                   tencent_hotword_list: str,
+                   tencent_convert_num_mode: int,
+                   tencent_filter_modal: int,
+                   tencent_filter_punc: int,
+                   tencent_filter_dirty: int,
+                   tencent_poll_interval: int,
+                   tencent_poll_timeout: int,
                    task: str,
                    image_ocr_provider: str,
                    ai_model: str,
@@ -485,6 +743,27 @@ def transcribe_url(url: str,
                 'model_path': None,
                 'transcription_source': str(tmp_path),
             }
+
+        if asr_provider == 'tencent':
+            return transcribe_with_tencent(
+                url=url,
+                language=language,
+                tencent_secret_id=tencent_secret_id,
+                tencent_secret_key=tencent_secret_key,
+                tencent_region=tencent_region,
+                tencent_engine_model_type=tencent_engine_model_type,
+                tencent_channel_num=tencent_channel_num,
+                tencent_res_text_format=tencent_res_text_format,
+                tencent_quality_mode=tencent_quality_mode,
+                tencent_hotword_id=tencent_hotword_id,
+                tencent_hotword_list=tencent_hotword_list,
+                tencent_convert_num_mode=tencent_convert_num_mode,
+                tencent_filter_modal=tencent_filter_modal,
+                tencent_filter_punc=tencent_filter_punc,
+                tencent_filter_dirty=tencent_filter_dirty,
+                tencent_poll_interval=tencent_poll_interval,
+                tencent_poll_timeout=tencent_poll_timeout,
+            )
 
         model, model_path = model_pool.get(model_name, device, compute_type)
         chunk_seconds = max(0, int(audio_chunk_seconds))
@@ -586,6 +865,76 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                         type=int,
                         default=int(os.getenv('AUDIO_CHUNK_SECONDS', '0')),
                         help='Split audio into chunks (seconds) before transcribe; 0 disables split')
+    parser.add_argument('--asr-provider',
+                        default=os.getenv('ASR_PROVIDER', str(RUNTIME_CONFIG['asr']['default_provider'])),
+                        choices=['local', 'tencent'],
+                        help='Audio ASR provider: local or tencent')
+    parser.add_argument('--tencent-secret-id',
+                        default=os.getenv('TENCENT_SECRET_ID', str(RUNTIME_CONFIG['asr']['tencent']['secret_id'])),
+                        help='Tencent Cloud SecretId')
+    parser.add_argument('--tencent-secret-key',
+                        default=os.getenv('TENCENT_SECRET_KEY', str(RUNTIME_CONFIG['asr']['tencent']['secret_key'])),
+                        help='Tencent Cloud SecretKey')
+    parser.add_argument('--tencent-region',
+                        default=os.getenv('TENCENT_REGION', str(RUNTIME_CONFIG['asr']['tencent']['region'])),
+                        help='Tencent Cloud ASR region')
+    parser.add_argument('--tencent-engine-model-type',
+                        default=os.getenv('TENCENT_ENGINE_MODEL_TYPE',
+                                          str(RUNTIME_CONFIG['asr']['tencent']['engine_model_type'])),
+                        help='Tencent ASR EngineModelType')
+    parser.add_argument('--tencent-channel-num',
+                        type=int,
+                        default=int(os.getenv('TENCENT_CHANNEL_NUM',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['channel_num']))),
+                        help='Tencent ASR ChannelNum')
+    parser.add_argument('--tencent-res-text-format',
+                        type=int,
+                        default=int(os.getenv('TENCENT_RES_TEXT_FORMAT',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['res_text_format']))),
+                        help='Tencent ASR ResTextFormat')
+    parser.add_argument('--tencent-quality-mode',
+                        default=os.getenv('TENCENT_QUALITY_MODE',
+                                          str(RUNTIME_CONFIG['asr']['tencent']['quality_mode'])),
+                        choices=['standard', 'max'],
+                        help='Tencent quality preset: standard/max')
+    parser.add_argument('--tencent-hotword-id',
+                        default=os.getenv('TENCENT_HOTWORD_ID',
+                                          str(RUNTIME_CONFIG['asr']['tencent']['hotword_id'])),
+                        help='Tencent HotwordId')
+    parser.add_argument('--tencent-hotword-list',
+                        default=os.getenv('TENCENT_HOTWORD_LIST',
+                                          str(RUNTIME_CONFIG['asr']['tencent']['hotword_list'])),
+                        help='Tencent HotwordList, words joined by |')
+    parser.add_argument('--tencent-convert-num-mode',
+                        type=int,
+                        default=int(os.getenv('TENCENT_CONVERT_NUM_MODE',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['convert_num_mode']))),
+                        help='Tencent ConvertNumMode')
+    parser.add_argument('--tencent-filter-modal',
+                        type=int,
+                        default=int(os.getenv('TENCENT_FILTER_MODAL',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['filter_modal']))),
+                        help='Tencent FilterModal')
+    parser.add_argument('--tencent-filter-punc',
+                        type=int,
+                        default=int(os.getenv('TENCENT_FILTER_PUNC',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['filter_punc']))),
+                        help='Tencent FilterPunc')
+    parser.add_argument('--tencent-filter-dirty',
+                        type=int,
+                        default=int(os.getenv('TENCENT_FILTER_DIRTY',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['filter_dirty']))),
+                        help='Tencent FilterDirty')
+    parser.add_argument('--tencent-poll-interval',
+                        type=int,
+                        default=int(os.getenv('TENCENT_POLL_INTERVAL',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['poll_interval_seconds']))),
+                        help='Tencent polling interval seconds')
+    parser.add_argument('--tencent-poll-timeout',
+                        type=int,
+                        default=int(os.getenv('TENCENT_POLL_TIMEOUT',
+                                              str(RUNTIME_CONFIG['asr']['tencent']['poll_timeout_seconds']))),
+                        help='Tencent polling timeout seconds')
 
 
 def run_transcribe_command(args: argparse.Namespace) -> int:
@@ -604,6 +953,22 @@ def run_transcribe_command(args: argparse.Namespace) -> int:
         beam_size=args.beam_size,
         temperature=args.temperature,
         audio_chunk_seconds=args.audio_chunk_seconds,
+        asr_provider=args.asr_provider,
+        tencent_secret_id=args.tencent_secret_id,
+        tencent_secret_key=args.tencent_secret_key,
+        tencent_region=args.tencent_region,
+        tencent_engine_model_type=args.tencent_engine_model_type,
+        tencent_channel_num=args.tencent_channel_num,
+        tencent_res_text_format=args.tencent_res_text_format,
+        tencent_quality_mode=args.tencent_quality_mode,
+        tencent_hotword_id=args.tencent_hotword_id,
+        tencent_hotword_list=args.tencent_hotword_list,
+        tencent_convert_num_mode=args.tencent_convert_num_mode,
+        tencent_filter_modal=args.tencent_filter_modal,
+        tencent_filter_punc=args.tencent_filter_punc,
+        tencent_filter_dirty=args.tencent_filter_dirty,
+        tencent_poll_interval=args.tencent_poll_interval,
+        tencent_poll_timeout=args.tencent_poll_timeout,
         task=args.task,
         image_ocr_provider=args.image_ocr_provider,
         ai_model=args.ocr_model,
@@ -630,6 +995,22 @@ def serve_command(args: argparse.Namespace) -> int:
         'beam_size': args.beam_size,
         'temperature': args.temperature,
         'audio_chunk_seconds': args.audio_chunk_seconds,
+        'asr_provider': args.asr_provider,
+        'tencent_secret_id': args.tencent_secret_id,
+        'tencent_secret_key': args.tencent_secret_key,
+        'tencent_region': args.tencent_region,
+        'tencent_engine_model_type': args.tencent_engine_model_type,
+        'tencent_channel_num': args.tencent_channel_num,
+        'tencent_res_text_format': args.tencent_res_text_format,
+        'tencent_quality_mode': args.tencent_quality_mode,
+        'tencent_hotword_id': args.tencent_hotword_id,
+        'tencent_hotword_list': args.tencent_hotword_list,
+        'tencent_convert_num_mode': args.tencent_convert_num_mode,
+        'tencent_filter_modal': args.tencent_filter_modal,
+        'tencent_filter_punc': args.tencent_filter_punc,
+        'tencent_filter_dirty': args.tencent_filter_dirty,
+        'tencent_poll_interval': args.tencent_poll_interval,
+        'tencent_poll_timeout': args.tencent_poll_timeout,
         'task': args.task,
         'image_ocr_provider': args.image_ocr_provider,
         'ai_model': args.ocr_model,
@@ -727,6 +1108,22 @@ def serve_command(args: argparse.Namespace) -> int:
                     beam_size=beam,
                     temperature=temp,
                     audio_chunk_seconds=audio_chunk_seconds,
+                    asr_provider=payload.get('asr_provider', cfg['asr_provider']),
+                    tencent_secret_id=payload.get('tencent_secret_id', cfg['tencent_secret_id']),
+                    tencent_secret_key=payload.get('tencent_secret_key', cfg['tencent_secret_key']),
+                    tencent_region=payload.get('tencent_region', cfg['tencent_region']),
+                    tencent_engine_model_type=payload.get('tencent_engine_model_type', cfg['tencent_engine_model_type']),
+                    tencent_channel_num=int(payload.get('tencent_channel_num', cfg['tencent_channel_num'])),
+                    tencent_res_text_format=int(payload.get('tencent_res_text_format', cfg['tencent_res_text_format'])),
+                    tencent_quality_mode=payload.get('tencent_quality_mode', cfg['tencent_quality_mode']),
+                    tencent_hotword_id=payload.get('tencent_hotword_id', cfg['tencent_hotword_id']),
+                    tencent_hotword_list=payload.get('tencent_hotword_list', cfg['tencent_hotword_list']),
+                    tencent_convert_num_mode=int(payload.get('tencent_convert_num_mode', cfg['tencent_convert_num_mode'])),
+                    tencent_filter_modal=int(payload.get('tencent_filter_modal', cfg['tencent_filter_modal'])),
+                    tencent_filter_punc=int(payload.get('tencent_filter_punc', cfg['tencent_filter_punc'])),
+                    tencent_filter_dirty=int(payload.get('tencent_filter_dirty', cfg['tencent_filter_dirty'])),
+                    tencent_poll_interval=int(payload.get('tencent_poll_interval', cfg['tencent_poll_interval'])),
+                    tencent_poll_timeout=int(payload.get('tencent_poll_timeout', cfg['tencent_poll_timeout'])),
                     task=payload.get('task') or ('image' if self.path == '/ocr' else cfg['task']),
                     image_ocr_provider=payload.get('image_ocr_provider', cfg['image_ocr_provider']),
                     ai_model=payload.get('ocr_model', cfg['ai_model']),
@@ -802,6 +1199,22 @@ def cmd_start(args: argparse.Namespace) -> int:
         '--beam-size', str(args.beam_size),
         '--temperature', str(args.temperature),
         '--audio-chunk-seconds', str(args.audio_chunk_seconds),
+        '--asr-provider', args.asr_provider,
+        '--tencent-secret-id', args.tencent_secret_id,
+        '--tencent-secret-key', args.tencent_secret_key,
+        '--tencent-region', args.tencent_region,
+        '--tencent-engine-model-type', args.tencent_engine_model_type,
+        '--tencent-channel-num', str(args.tencent_channel_num),
+        '--tencent-res-text-format', str(args.tencent_res_text_format),
+        '--tencent-quality-mode', args.tencent_quality_mode,
+        '--tencent-hotword-id', args.tencent_hotword_id,
+        '--tencent-hotword-list', args.tencent_hotword_list,
+        '--tencent-convert-num-mode', str(args.tencent_convert_num_mode),
+        '--tencent-filter-modal', str(args.tencent_filter_modal),
+        '--tencent-filter-punc', str(args.tencent_filter_punc),
+        '--tencent-filter-dirty', str(args.tencent_filter_dirty),
+        '--tencent-poll-interval', str(args.tencent_poll_interval),
+        '--tencent-poll-timeout', str(args.tencent_poll_timeout),
     ]
     if args.no_vad:
         cmd.append('--no-vad')

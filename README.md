@@ -1,7 +1,8 @@
 # to_text
 
 音频/图片 URL 转文本服务，支持：
-- 音频转写（`faster-whisper`）
+- 音频转写（`Tencent Cloud ASR`，默认）
+- 音频转写（`faster-whisper`，可切换）
 - 图片 OCR（`PaddleOCR` / `pytesseract` / AI 视觉模型）
 - HTTP API（`/health`、`/transcribe`、`/ocr`）
 
@@ -29,6 +30,14 @@
 - 体积：约 `450MB~550MB`（不同版本略有波动）
 - Git 提交策略：**不提交模型文件**（已在 `.gitignore` 忽略 `models/`）
 
+### 2.2 腾讯云 ASR（默认）
+
+- 接口：`CreateRecTask` + `DescribeTaskStatus`（异步轮询）
+- 默认配置文件：`./transcribe_config.json`
+- 默认模式字段：`asr.default_provider`（当前默认 `tencent`）
+- 凭证字段：`asr.tencent.secret_id`、`asr.tencent.secret_key`
+- 当前默认识别参数：`engine_model_type=16k_zh`、`res_text_format=3`
+
 下载方式：
 ```bash
 cd /data/project/to_text
@@ -40,7 +49,7 @@ cd /data/project/to_text
 2. 打包 `models/small` 后拷贝到目标机 `/data/project/to_text/models/small`
 3. 目标机启动前确认目录非空：`ls -lah /data/project/to_text/models/small`
 
-### 2.2 图片 OCR 模型
+### 2.3 图片 OCR 模型
 
 - 本地 OCR（推荐）：`PaddleOCR`（`lang=ch`）
 - 本地兼容：`pytesseract`
@@ -103,7 +112,29 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 
 长音频建议在请求中设置 `audio_chunk_seconds`（例如 `60`）启用分段转写，服务会自动拼接文本，降低 7~8 分钟以上音频的失败率。
 
-## 6. Git 提交说明
+## 6. 腾讯云模式示例
+
+默认走配置里的 `asr.default_provider`。单次请求可覆盖：
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.mp3",
+    "asr_provider": "tencent",
+    "raw": true
+  }'
+```
+
+CLI 示例：
+
+```bash
+python3 transcribe_http_to_text.py transcribe 'https://example.com/demo.mp3' \
+  --asr-provider tencent \
+  --json
+```
+
+## 7. Git 提交说明
 
 仓库已配置忽略大文件：
 - `models/`
