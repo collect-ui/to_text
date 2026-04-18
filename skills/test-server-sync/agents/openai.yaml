@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Server Sync"
+  short_description: "Sync test server code, restart service, and verify API."
+  default_prompt: "Use this skill to sync 202.140.140.117:/data/to_text from origin/main, restart the transcribe service, and verify /transcribe with the fixed mp3 URL."
