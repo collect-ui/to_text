@@ -35,6 +35,11 @@ cd /data/project/to_text
 ./prepare_faster_whisper_model.sh
 ```
 
+离线机器拿模型（网络不通）：
+1. 在可联网机器先执行 `./prepare_faster_whisper_model.sh`
+2. 打包 `models/small` 后拷贝到目标机 `/data/project/to_text/models/small`
+3. 目标机启动前确认目录非空：`ls -lah /data/project/to_text/models/small`
+
 ### 2.2 图片 OCR 模型
 
 - 本地 OCR（推荐）：`PaddleOCR`（`lang=ch`）
@@ -79,6 +84,7 @@ chmod +x scripts/install_linux_oneclick.sh
 4. 自动启动服务
 
 更多参数见：`docs/INSTALL_DEPLOY.md`
+模型下载失败、离线拷贝、OCR 安装重点见：`docs/INSTALL_DEPLOY.md` 第 `7/8/9` 节
 
 ### 4.1 安装为 Linux systemd 服务（开机自启）
 
