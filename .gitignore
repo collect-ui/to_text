@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Runtime
+*.log
+*.pid
+
+# Model artifacts (large files, do not commit)
+models/
+
+# OCR runtime caches
+.paddleocr/
+.paddlex/
+
+# OS
+.DS_Store
