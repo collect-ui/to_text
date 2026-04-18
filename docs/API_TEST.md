@@ -70,6 +70,7 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 - `ocr_api_endpoint`：AI OCR endpoint
 - `ocr_api_key`：AI OCR key
 - `raw`：`true` 时返回原始结构
+- `audio_chunk_seconds`：音频分段秒数；`0` 为不分段（默认）
 
 ## 5. 一键冒烟测试脚本
 

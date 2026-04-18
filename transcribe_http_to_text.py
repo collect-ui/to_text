@@ -5,12 +5,14 @@
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, Literal, Tuple
@@ -114,6 +116,69 @@ def stream_download(url: str, target: Path) -> str:
 
 def concat_segments(segments: Iterable) -> str:
     return ''.join(segment.text for segment in segments).strip()
+
+
+def split_audio_to_wav_chunks(source: Path, chunk_seconds: int, output_dir: Path) -> list[Path]:
+    if chunk_seconds <= 0:
+        return [source]
+    try:
+        import av
+        import numpy as np
+    except Exception as err:
+        raise RuntimeError(f'chunk split dependency missing: {err}') from err
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_rate = 16000
+    bytes_per_sample = 2
+    chunk_size_bytes = int(chunk_seconds) * sample_rate * bytes_per_sample
+    if chunk_size_bytes <= 0:
+        return [source]
+
+    buffer = bytearray()
+    chunks: list[Path] = []
+    chunk_idx = 0
+
+    def write_chunk(raw_pcm: bytes) -> None:
+        nonlocal chunk_idx
+        out_path = output_dir / f'chunk_{chunk_idx:05d}.wav'
+        with wave.open(str(out_path), 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(bytes_per_sample)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(raw_pcm)
+        chunks.append(out_path)
+        chunk_idx += 1
+
+    with av.open(str(source)) as container:
+        audio_stream = next((stream for stream in container.streams if stream.type == 'audio'), None)
+        if audio_stream is None:
+            raise RuntimeError('no audio stream found for chunk split')
+        resampler = av.audio.resampler.AudioResampler(
+            format='s16',
+            layout='mono',
+            rate=sample_rate,
+        )
+        for frame in container.decode(audio_stream):
+            resampled = resampler.resample(frame)
+            if resampled is None:
+                continue
+            frames = resampled if isinstance(resampled, list) else [resampled]
+            for one in frames:
+                pcm = one.to_ndarray()
+                if pcm.ndim == 2:
+                    pcm = pcm[0]
+                pcm_bytes = np.asarray(pcm, dtype=np.int16).tobytes()
+                if pcm_bytes:
+                    buffer.extend(pcm_bytes)
+                while len(buffer) >= chunk_size_bytes:
+                    write_chunk(bytes(buffer[:chunk_size_bytes]))
+                    del buffer[:chunk_size_bytes]
+
+    if buffer:
+        write_chunk(bytes(buffer))
+    if not chunks:
+        raise RuntimeError('audio chunk split produced no chunks')
+    return chunks
 
 
 def to_simplified_chinese(text: str) -> str:
@@ -383,6 +448,7 @@ def transcribe_url(url: str,
                    vad_filter: bool,
                    beam_size: int,
                    temperature: float,
+                   audio_chunk_seconds: int,
                    task: str,
                    image_ocr_provider: str,
                    ai_model: str,
@@ -421,14 +487,34 @@ def transcribe_url(url: str,
             }
 
         model, model_path = model_pool.get(model_name, device, compute_type)
-        segments, info = model.transcribe(
-            str(tmp_path),
-            language=language,
-            vad_filter=vad_filter,
-            beam_size=beam_size,
-            temperature=temperature,
-        )
-        text = concat_segments(segments)
+        chunk_seconds = max(0, int(audio_chunk_seconds))
+        chunk_paths = [tmp_path]
+        if chunk_seconds > 0:
+            chunk_dir = Path(tempfile.mkdtemp(prefix='transcribe_chunks_'))
+            chunk_paths = split_audio_to_wav_chunks(tmp_path, chunk_seconds, chunk_dir)
+        else:
+            chunk_dir = None
+
+        text_parts: list[str] = []
+        detected_language = language
+        total_duration = 0.0
+        for chunk_path in chunk_paths:
+            segments, info = model.transcribe(
+                str(chunk_path),
+                language=language,
+                vad_filter=vad_filter,
+                beam_size=beam_size,
+                temperature=temperature,
+            )
+            part = concat_segments(segments)
+            if part:
+                text_parts.append(part.strip())
+            if info and info.language:
+                detected_language = info.language
+            if info and info.duration:
+                total_duration += float(info.duration)
+
+        text = '\n'.join(text_parts).strip()
         text = to_simplified_chinese(text)
 
         return {
@@ -436,11 +522,13 @@ def transcribe_url(url: str,
             'status': 'ok',
             'task': 'audio',
             'text': text,
-            'language': info.language if info and info.language else language,
-            'duration': info.duration if info else None,
+            'language': detected_language,
+            'duration': total_duration if total_duration > 0 else None,
             'engine': 'faster-whisper',
             'model': model_name,
             'model_path': model_path,
+            'audio_chunk_seconds': chunk_seconds,
+            'chunk_count': len(chunk_paths),
             'transcription_source': str(tmp_path),
         }
     except Exception as err:  # pragma: no cover - entrypoint handling
@@ -450,6 +538,12 @@ def transcribe_url(url: str,
             'error': str(err),
         }
     finally:
+        chunk_dir_obj = locals().get('chunk_dir')
+        if chunk_dir_obj is not None:
+            try:
+                shutil.rmtree(chunk_dir_obj, ignore_errors=True)
+            except Exception:
+                pass
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
@@ -488,6 +582,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--no-vad', action='store_true', help='Disable VAD filter')
     parser.add_argument('--beam-size', type=int, default=5, help='Whisper beam size')
     parser.add_argument('--temperature', type=float, default=0.0, help='Sampling temperature')
+    parser.add_argument('--audio-chunk-seconds',
+                        type=int,
+                        default=int(os.getenv('AUDIO_CHUNK_SECONDS', '0')),
+                        help='Split audio into chunks (seconds) before transcribe; 0 disables split')
 
 
 def run_transcribe_command(args: argparse.Namespace) -> int:
@@ -505,6 +603,7 @@ def run_transcribe_command(args: argparse.Namespace) -> int:
         vad_filter=not args.no_vad,
         beam_size=args.beam_size,
         temperature=args.temperature,
+        audio_chunk_seconds=args.audio_chunk_seconds,
         task=args.task,
         image_ocr_provider=args.image_ocr_provider,
         ai_model=args.ocr_model,
@@ -530,6 +629,7 @@ def serve_command(args: argparse.Namespace) -> int:
         'vad_filter': not args.no_vad,
         'beam_size': args.beam_size,
         'temperature': args.temperature,
+        'audio_chunk_seconds': args.audio_chunk_seconds,
         'task': args.task,
         'image_ocr_provider': args.image_ocr_provider,
         'ai_model': args.ocr_model,
@@ -607,6 +707,14 @@ def serve_command(args: argparse.Namespace) -> int:
                 except Exception:
                     self._error(400, 'Invalid temperature')
                     return
+                try:
+                    audio_chunk_seconds = int(payload.get('audio_chunk_seconds', cfg['audio_chunk_seconds']))
+                except Exception:
+                    self._error(400, 'Invalid audio_chunk_seconds')
+                    return
+                if audio_chunk_seconds < 0:
+                    self._error(400, 'Invalid audio_chunk_seconds')
+                    return
 
                 req = transcribe_url(
                     url=url,
@@ -618,6 +726,7 @@ def serve_command(args: argparse.Namespace) -> int:
                     vad_filter=not bool(payload.get('no_vad', False)) if payload.get('no_vad', False) else cfg['vad_filter'],
                     beam_size=beam,
                     temperature=temp,
+                    audio_chunk_seconds=audio_chunk_seconds,
                     task=payload.get('task') or ('image' if self.path == '/ocr' else cfg['task']),
                     image_ocr_provider=payload.get('image_ocr_provider', cfg['image_ocr_provider']),
                     ai_model=payload.get('ocr_model', cfg['ai_model']),
@@ -632,8 +741,9 @@ def serve_command(args: argparse.Namespace) -> int:
                     wrapped = wrap_result_payload(req)
                     # Keep wrapped response HTTP 200 to avoid transport-layer retries.
                     self._json_resp(wrapped, 200)
-            except Exception:
-                self.log_error('POST %s failed', self.path)
+            except Exception as exc:
+                import traceback
+                self.log_error('POST %s failed: %s', self.path, traceback.format_exc())
                 self._error(500, 'server_error')
 
     # attach model_pool for closure safety
@@ -691,6 +801,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         '--task', args.task,
         '--beam-size', str(args.beam_size),
         '--temperature', str(args.temperature),
+        '--audio-chunk-seconds', str(args.audio_chunk_seconds),
     ]
     if args.no_vad:
         cmd.append('--no-vad')

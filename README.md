@@ -101,6 +101,8 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 
 详细请求样例见：`docs/API_TEST.md`
 
+长音频建议在请求中设置 `audio_chunk_seconds`（例如 `60`）启用分段转写，服务会自动拼接文本，降低 7~8 分钟以上音频的失败率。
+
 ## 6. Git 提交说明
 
 仓库已配置忽略大文件：
