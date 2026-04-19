@@ -53,6 +53,9 @@ DEFAULT_LOG_FILE = SCRIPT_DIR / 'transcribe_http_to_text.log'
 DEFAULT_AI_OCR_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
 DEFAULT_AI_OCR_MODEL = 'gpt-4o-mini'
 DEFAULT_CONFIG_FILE = SCRIPT_DIR / 'transcribe_config.json'
+DEFAULT_RESULT_CACHE_DIR = SCRIPT_DIR / 'cache' / 'transcribe_result'
+DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
+DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
 
@@ -663,6 +666,160 @@ class ModelPool:
             return model, model_path
 
 
+class ResultCache:
+    def __init__(self, cache_dir: Path, max_entries: int, max_size_mb: int) -> None:
+        self._cache_dir = cache_dir
+        self._entries_dir = cache_dir / 'entries'
+        self._index_file = cache_dir / 'index.json'
+        self._max_entries = max(1, int(max_entries))
+        self._max_size_bytes = max(1, int(max_size_mb)) * 1024 * 1024
+        self._lock = threading.Lock()
+        self._index: Dict[str, Dict] = {}
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._entries_dir.mkdir(parents=True, exist_ok=True)
+        self._load_index()
+
+    @staticmethod
+    def _key_for_url(url: str) -> str:
+        return hashlib.sha256(url.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _now() -> Tuple[float, str]:
+        ts = time.time()
+        return ts, datetime.datetime.fromtimestamp(ts).isoformat(timespec='seconds')
+
+    def _entry_file(self, key: str) -> Path:
+        return self._entries_dir / f'{key}.json'
+
+    def _write_json_atomic(self, path: Path, payload: Dict) -> int:
+        raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        tmp.write_bytes(raw)
+        tmp.replace(path)
+        return len(raw)
+
+    def _load_index(self) -> None:
+        try:
+            data = json.loads(self._index_file.read_text(encoding='utf-8'))
+            entries = data.get('entries', {}) if isinstance(data, dict) else {}
+            if isinstance(entries, dict):
+                self._index = entries
+        except Exception:
+            self._index = {}
+
+    def _save_index_locked(self) -> None:
+        payload = {
+            'version': 1,
+            'updated_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'entries': self._index,
+        }
+        self._write_json_atomic(self._index_file, payload)
+
+    def _delete_entry_locked(self, key: str) -> None:
+        self._index.pop(key, None)
+        try:
+            self._entry_file(key).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _evict_locked(self) -> None:
+        total_size = sum(int(meta.get('size_bytes', 0) or 0) for meta in self._index.values())
+        while len(self._index) > self._max_entries or total_size > self._max_size_bytes:
+            victim_key = None
+            victim_access_ts = None
+            for key, meta in self._index.items():
+                access_ts = float(meta.get('last_access_ts') or meta.get('created_ts') or 0)
+                if victim_key is None or access_ts < victim_access_ts:
+                    victim_key = key
+                    victim_access_ts = access_ts
+            if victim_key is None:
+                break
+            total_size -= int(self._index.get(victim_key, {}).get('size_bytes', 0) or 0)
+            self._delete_entry_locked(victim_key)
+
+    def get(self, url: str) -> Dict | None:
+        key = self._key_for_url(url)
+        with self._lock:
+            meta = self._index.get(key)
+            if not meta:
+                return None
+            entry_file = self._entry_file(key)
+            if not entry_file.exists():
+                self._delete_entry_locked(key)
+                self._save_index_locked()
+                return None
+            try:
+                payload = json.loads(entry_file.read_text(encoding='utf-8'))
+                result = payload.get('result') if isinstance(payload, dict) else None
+                if not isinstance(result, dict):
+                    raise RuntimeError('invalid_cache_payload')
+            except Exception:
+                self._delete_entry_locked(key)
+                self._save_index_locked()
+                return None
+
+            now_ts, now_iso = self._now()
+            meta['last_access_ts'] = now_ts
+            meta['last_access_at'] = now_iso
+            payload['last_access_at'] = now_iso
+            payload['last_access_ts'] = now_ts
+            try:
+                size_bytes = self._write_json_atomic(entry_file, payload)
+                meta['size_bytes'] = size_bytes
+            except Exception:
+                self._delete_entry_locked(key)
+                self._save_index_locked()
+                return None
+            self._save_index_locked()
+            return result
+
+    def put(self, url: str, result: Dict) -> None:
+        # Cache only successful audio transcripts.
+        if result.get('status') != 'ok' or result.get('task') != 'audio':
+            return
+        key = self._key_for_url(url)
+        now_ts, now_iso = self._now()
+        with self._lock:
+            prev = self._index.get(key, {})
+            created_ts = float(prev.get('created_ts') or now_ts)
+            created_at = str(prev.get('created_at') or now_iso)
+            cached_result = dict(result)
+            cached_result.pop('cache_hit', None)
+            cached_result.pop('duration_ms', None)
+            cached_result.pop('transcription_source', None)
+            entry_payload = {
+                'url': url,
+                'created_at': created_at,
+                'created_ts': created_ts,
+                'updated_at': now_iso,
+                'updated_ts': now_ts,
+                'last_access_at': now_iso,
+                'last_access_ts': now_ts,
+                'status': cached_result.get('status'),
+                'task': cached_result.get('task'),
+                'text': cached_result.get('text', ''),
+                'result': cached_result,
+            }
+            entry_file = self._entry_file(key)
+            size_bytes = self._write_json_atomic(entry_file, entry_payload)
+            self._index[key] = {
+                'key': key,
+                'url': url,
+                'entry_file': str(entry_file.relative_to(self._cache_dir)),
+                'size_bytes': size_bytes,
+                'status': entry_payload['status'],
+                'task': entry_payload['task'],
+                'created_at': created_at,
+                'created_ts': created_ts,
+                'updated_at': now_iso,
+                'updated_ts': now_ts,
+                'last_access_at': now_iso,
+                'last_access_ts': now_ts,
+            }
+            self._evict_locked()
+            self._save_index_locked()
+
+
 def wrap_result_payload(result: Dict) -> Dict:
     if result.get('status') == 'ok':
         return {
@@ -712,7 +869,15 @@ def transcribe_url(url: str,
                    ai_model: str,
                    ai_endpoint: str,
                    ai_timeout: int,
-                   ai_api_key: str | None) -> Dict:
+                   ai_api_key: str | None,
+                   result_cache: ResultCache | None = None) -> Dict:
+    if result_cache is not None and task != 'image':
+        cached = result_cache.get(url)
+        if cached is not None:
+            cache_result = dict(cached)
+            cache_result['cache_hit'] = True
+            return cache_result
+
     suffix = Path(urlparse(url).path).suffix or '.audio'
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -742,10 +907,11 @@ def transcribe_url(url: str,
                 'model': 'image-ocr',
                 'model_path': None,
                 'transcription_source': str(tmp_path),
+                'cache_hit': False,
             }
 
         if asr_provider == 'tencent':
-            return transcribe_with_tencent(
+            result = transcribe_with_tencent(
                 url=url,
                 language=language,
                 tencent_secret_id=tencent_secret_id,
@@ -764,6 +930,13 @@ def transcribe_url(url: str,
                 tencent_poll_interval=tencent_poll_interval,
                 tencent_poll_timeout=tencent_poll_timeout,
             )
+            if result_cache is not None:
+                try:
+                    result_cache.put(url, result)
+                except Exception:
+                    pass
+            result['cache_hit'] = False
+            return result
 
         model, model_path = model_pool.get(model_name, device, compute_type)
         chunk_seconds = max(0, int(audio_chunk_seconds))
@@ -796,7 +969,7 @@ def transcribe_url(url: str,
         text = '\n'.join(text_parts).strip()
         text = to_simplified_chinese(text)
 
-        return {
+        result = {
             'url': url,
             'status': 'ok',
             'task': 'audio',
@@ -810,11 +983,19 @@ def transcribe_url(url: str,
             'chunk_count': len(chunk_paths),
             'transcription_source': str(tmp_path),
         }
+        if result_cache is not None:
+            try:
+                result_cache.put(url, result)
+            except Exception:
+                pass
+        result['cache_hit'] = False
+        return result
     except Exception as err:  # pragma: no cover - entrypoint handling
         return {
             'url': url,
             'status': 'error',
             'error': str(err),
+            'cache_hit': False,
         }
     finally:
         chunk_dir_obj = locals().get('chunk_dir')
@@ -869,6 +1050,20 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                         default=os.getenv('ASR_PROVIDER', str(RUNTIME_CONFIG['asr']['default_provider'])),
                         choices=['local', 'tencent'],
                         help='Audio ASR provider: local or tencent')
+    parser.add_argument('--cache-dir',
+                        default=os.getenv('RESULT_CACHE_DIR', str(DEFAULT_RESULT_CACHE_DIR)),
+                        help='Result cache directory (default: ./cache/transcribe_result)')
+    parser.add_argument('--cache-max-entries',
+                        type=int,
+                        default=int(os.getenv('RESULT_CACHE_MAX_ENTRIES', str(DEFAULT_RESULT_CACHE_MAX_ENTRIES))),
+                        help='Result cache max entry count (LRU)')
+    parser.add_argument('--cache-max-size-mb',
+                        type=int,
+                        default=int(os.getenv('RESULT_CACHE_MAX_SIZE_MB', str(DEFAULT_RESULT_CACHE_MAX_SIZE_MB))),
+                        help='Result cache max total size in MB (LRU)')
+    parser.add_argument('--no-result-cache',
+                        action='store_true',
+                        help='Disable local URL result cache')
     parser.add_argument('--tencent-secret-id',
                         default=os.getenv('TENCENT_SECRET_ID', str(RUNTIME_CONFIG['asr']['tencent']['secret_id'])),
                         help='Tencent Cloud SecretId')
@@ -940,6 +1135,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def run_transcribe_command(args: argparse.Namespace) -> int:
     model_dir = Path(args.model_dir).expanduser().resolve()
     model_pool = ModelPool(model_dir)
+    cache = None if args.no_result_cache else ResultCache(
+        Path(args.cache_dir).expanduser().resolve(),
+        args.cache_max_entries,
+        args.cache_max_size_mb,
+    )
     language = args.language.strip() or None
 
     result = transcribe_url(
@@ -975,6 +1175,7 @@ def run_transcribe_command(args: argparse.Namespace) -> int:
         ai_endpoint=args.ocr_api_endpoint,
         ai_timeout=args.ocr_timeout,
         ai_api_key=args.ocr_api_key,
+        result_cache=cache,
     )
 
     print(json.dumps(result, ensure_ascii=False) if args.json else result.get('text', ''))
@@ -985,6 +1186,11 @@ def serve_command(args: argparse.Namespace) -> int:
     host = args.host
     port = args.port
     model_pool = ModelPool(Path(args.model_dir).expanduser().resolve())
+    cache = None if args.no_result_cache else ResultCache(
+        Path(args.cache_dir).expanduser().resolve(),
+        args.cache_max_entries,
+        args.cache_max_size_mb,
+    )
     defaults = {
         'model': args.model,
         'model_dir': Path(args.model_dir).expanduser().resolve(),
@@ -1017,6 +1223,7 @@ def serve_command(args: argparse.Namespace) -> int:
         'ai_endpoint': args.ocr_api_endpoint,
         'ai_timeout': args.ocr_timeout,
         'ai_api_key': args.ocr_api_key,
+        'cache_enabled': cache is not None,
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -1024,6 +1231,7 @@ def serve_command(args: argparse.Namespace) -> int:
         server_version = 'transcribe-http/1.0'
         server_ctx = {
             'model_pool': model_pool,
+            'result_cache': cache,
             'defaults': defaults,
         }
 
@@ -1130,6 +1338,7 @@ def serve_command(args: argparse.Namespace) -> int:
                     ai_endpoint=payload.get('ocr_api_endpoint', cfg['ai_endpoint']),
                     ai_timeout=int(payload.get('ocr_timeout', cfg['ai_timeout'])),
                     ai_api_key=payload.get('ocr_api_key', cfg['ai_api_key']),
+                    result_cache=self.server_ctx['result_cache'] if self.path == '/transcribe' else None,
                 )
                 req['duration_ms'] = int(req.get('duration', 0) * 1000) if req.get('duration') else 0
                 if payload.get('raw') is True:
@@ -1200,6 +1409,9 @@ def cmd_start(args: argparse.Namespace) -> int:
         '--temperature', str(args.temperature),
         '--audio-chunk-seconds', str(args.audio_chunk_seconds),
         '--asr-provider', args.asr_provider,
+        '--cache-dir', args.cache_dir,
+        '--cache-max-entries', str(args.cache_max_entries),
+        '--cache-max-size-mb', str(args.cache_max_size_mb),
         '--tencent-secret-id', args.tencent_secret_id,
         '--tencent-secret-key', args.tencent_secret_key,
         '--tencent-region', args.tencent_region,
@@ -1218,6 +1430,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     ]
     if args.no_vad:
         cmd.append('--no-vad')
+    if args.no_result_cache:
+        cmd.append('--no-result-cache')
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open('a', encoding='utf-8') as out:

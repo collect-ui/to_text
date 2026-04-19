@@ -8,6 +8,7 @@ __pycache__/
 # Runtime
 *.log
 *.pid
+cache/
 compare_report_*.md
 tencent_quality_compare_*.md
 transcript_*.txt

@@ -37,6 +37,16 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
   }'
 ```
 
+缓存命中验证（第二次同 URL 请求应返回 `cache_hit=true`）：
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.mp3",
+    "raw": true
+  }'
+```
+
 默认返回为业务封装结构：
 ```json
 {
@@ -69,6 +79,7 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
   "text": "...OCR文本...",
   "engine": "paddleocr",
   "model": "image-ocr",
+  "cache_hit": false,
   "duration_ms": 0
 }
 ```
@@ -85,12 +96,19 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 - `raw`：`true` 时返回原始结构
 - `audio_chunk_seconds`：音频分段秒数；`0` 为不分段（默认）
 - `asr_provider`：`local|tencent`，默认读取 `transcribe_config.json`（当前默认 `tencent`）
+- `cache_hit`（响应字段，仅 `raw=true` 时可见）：是否命中本地缓存
 - `tencent_secret_id` / `tencent_secret_key`：单次请求覆盖腾讯云密钥
 - `tencent_region`：默认 `ap-beijing`
 - `tencent_engine_model_type`：默认 `16k_zh`
 - `tencent_res_text_format`：当前默认 `3`
 - `tencent_quality_mode`：`standard|max`，默认 `standard`
 - `tencent_filter_modal`：当前默认 `1`
+
+服务级缓存参数（CLI）：
+- `--cache-dir`：缓存目录（默认 `./cache/transcribe_result`）
+- `--cache-max-entries`：最大缓存条目数（默认 `500`）
+- `--cache-max-size-mb`：最大缓存体积（默认 `200` MB）
+- `--no-result-cache`：禁用缓存
 
 ## 5. 一键冒烟测试脚本
 

@@ -108,6 +108,20 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 - `POST /transcribe`
 - `POST /ocr`
 
+### 5.1 转写结果缓存（默认开启）
+
+- 仅缓存音频转写成功结果（`status=ok` 且 `task=audio`）
+- 缓存键：完整 URL 完全一致
+- 默认目录：`./cache/transcribe_result`
+- 默认策略：LRU，最多 `500` 条且最多 `200MB`（任一超限都会淘汰最久未访问项）
+- `raw=true` 时会返回 `cache_hit: true|false`
+
+可通过参数调整：
+- `--cache-dir`
+- `--cache-max-entries`
+- `--cache-max-size-mb`
+- `--no-result-cache`
+
 详细请求样例见：`docs/API_TEST.md`
 
 长音频建议在请求中设置 `audio_chunk_seconds`（例如 `60`）启用分段转写，服务会自动拼接文本，降低 7~8 分钟以上音频的失败率。
