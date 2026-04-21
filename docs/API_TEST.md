@@ -21,6 +21,10 @@ curl -s 'http://127.0.0.1:8014/tencent/quota'
 curl -s 'http://127.0.0.1:8014/tencent/quota?start_date=2026-04-01&end_date=2026-04-21'
 ```
 
+说明：
+- 返回主结构仍是 ASR 用量
+- 同时会额外带 `ocr_usage` 字段，里面是腾讯 OCR 控制台官方调用统计
+
 ## 2. 音频转写 `/transcribe`
 
 请求：
@@ -64,14 +68,15 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
 }
 ```
 
-## 3. 图片 OCR `/ocr`
+## 3. 图片 OCR `/transcribe`
 
 请求（原始结果）：
 ```bash
-curl -s -X POST 'http://127.0.0.1:8014/ocr' \
+curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
   -H 'Content-Type: application/json' \
   -d '{
     "url": "https://example.com/demo.jpg",
+    "task": "image",
     "raw": true
   }'
 ```
@@ -83,7 +88,7 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
   "status": "ok",
   "task": "image",
   "text": "...OCR文本...",
-  "engine": "paddleocr",
+  "engine": "tencent-ocr",
   "model": "image-ocr",
   "cache_hit": false,
   "duration_ms": 0
@@ -95,7 +100,7 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 - `model`：语音模型名，默认 `small`
 - `language`：默认 `zh`
 - `task`：`auto|audio|image`
-- `image_ocr_provider`：`auto|paddleocr|pytesseract|ai`
+- `image_ocr_provider`：`tencent|auto|paddleocr|pytesseract|ai`
 - `ocr_model`：AI OCR 模型名，默认 `gpt-4o-mini`
 - `ocr_api_endpoint`：AI OCR endpoint
 - `ocr_api_key`：AI OCR key
@@ -106,10 +111,15 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 - `tencent_secret_id` / `tencent_secret_key`：单次请求覆盖腾讯云密钥
 - `asr.tencent.accounts`：服务级多账号池，未显式传单次密钥时按账号轮询
 - `tencent_region`：默认 `ap-beijing`
+- 图片 OCR 默认也复用上述腾讯密钥与区域配置
 - `tencent_engine_model_type`：默认 `16k_zh`
 - `tencent_res_text_format`：当前默认 `3`
 - `tencent_quality_mode`：`standard|max`，默认 `standard`
 - `tencent_filter_modal`：当前默认 `1`
+
+兼容说明：
+- `POST /transcribe` 是统一入口，音频 / 图片都建议走它
+- `POST /ocr` 仍可用，但仅作为兼容别名
 
 `GET /tencent/quota` 查询参数：
 - `start_date`：开始日期，默认当月 `1` 号
@@ -119,6 +129,7 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 注意：
 - 接口底层调用腾讯云官方 `GetUsageByDate`，返回的是“已用量”
 - 若配置了 `monthly_quota_seconds`，服务会额外返回按本地配置推算的 `remaining_quota_seconds`
+- `ocr_usage` 通过腾讯 OCR 官方控制台查询动作 `QueryCallForConsole` 获取，当前体现调用次数/成功数/失败数/计费次数，不返回剩余额度
 
 服务级缓存参数（CLI）：
 - `--cache-dir`：缓存目录（默认 `./cache/transcribe_result`）

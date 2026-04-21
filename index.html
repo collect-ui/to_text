@@ -187,7 +187,7 @@
 
     .stats {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 12px;
       margin-top: 18px;
     }
@@ -223,6 +223,18 @@
       border-radius: var(--radius-lg);
       background: linear-gradient(180deg, rgba(255,255,255,0.78), rgba(255,248,235,0.94));
       border: 1px solid rgba(28, 34, 27, 0.08);
+    }
+
+    .section-title {
+      margin: 20px 0 10px;
+      font-size: 18px;
+    }
+
+    .section-sub {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
     }
 
     .account-head {
@@ -331,6 +343,32 @@
       color: #a33535;
     }
 
+    .query-meta {
+      margin-top: 14px;
+      padding: 16px;
+      border-radius: var(--radius-lg);
+      background: rgba(255, 248, 235, 0.72);
+      border: 1px solid rgba(28, 34, 27, 0.08);
+    }
+
+    .query-meta h3 {
+      margin: 0 0 12px;
+      font-size: 16px;
+    }
+
+    .query-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .query-meta-grid strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
     @media (max-width: 980px) {
       .grid,
       .doc-grid,
@@ -345,9 +383,9 @@
 <body>
   <main class="shell">
     <section class="hero">
-      <div class="eyebrow">To Text / Tencent ASR / Quota Console</div>
+      <div class="eyebrow">To Text / Tencent Cloud / Usage Console</div>
       <h1>一眼看懂额度、接口和配置。</h1>
-      <p>这个首页直接绑定 <code>/tencent/quota</code>。上半区看用量和剩余额度，下半区放 API 使用说明和账号配置说明，默认路由就是 <code>/</code>。</p>
+      <p>这个首页直接绑定 <code>/tencent/quota</code>。上半区展示当前查询到的腾讯云用量和剩余额度，下半区放 API 使用说明和账号配置说明。图片 OCR 现在也走腾讯云，但首页这块用量看板当前查询的是腾讯 ASR 用量。</p>
       <div class="actions">
         <button id="refreshBtn" class="primary">刷新用量</button>
         <a class="btn ghost" href="/tencent/quota" target="_blank" rel="noreferrer">查看原始 JSON</a>
@@ -357,7 +395,7 @@
     <section class="grid">
       <div class="panel">
         <h2>额度看板</h2>
-        <p class="sub">按日期区间查询腾讯语音识别用量。首页默认展示小时，剩余额度来自服务端按 <code>monthly_quota_seconds - 已用秒数</code> 推算。</p>
+        <p class="sub">按日期区间查询腾讯云用量。当前接口 <code>/tencent/quota</code> 返回的是 ASR 用量；首页会把本次查询的日期范围、业务类型和账号选择策略一起展示出来。剩余额度来自服务端按 <code>monthly_quota_seconds - 已用秒数</code> 推算。</p>
         <div class="controls">
           <div>
             <label for="startDate">开始日期</label>
@@ -374,20 +412,39 @@
         </div>
         <div class="stats" id="summaryStats">
           <div class="stat"><div class="k">账号数</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">查询业务</div><div class="v">-</div></div>
           <div class="stat"><div class="k">总已用小时</div><div class="v">-</div></div>
           <div class="stat"><div class="k">总调用次数</div><div class="v">-</div></div>
         </div>
         <div class="status-line" id="statusLine">正在加载用量...</div>
+        <div class="query-meta" id="queryMeta">
+          <h3>查询信息</h3>
+          <div class="query-meta-grid">
+            <div><strong>时间范围：</strong><span id="queryRange">-</span></div>
+            <div><strong>业务类型：</strong><span id="queryBizNames">-</span></div>
+            <div><strong>选择策略：</strong><span id="queryStrategy">-</span></div>
+            <div><strong>说明：</strong><span id="queryNote">-</span></div>
+          </div>
+        </div>
+        <h3 class="section-title">ASR 账号用量</h3>
         <div class="cards" id="accountCards"></div>
+        <h3 class="section-title">OCR 用量</h3>
+        <p class="section-sub">这里展示腾讯 OCR 控制台的官方调用统计。目前返回的是调用次数、成功数、失败数和计费次数，不包含剩余额度。</p>
+        <div class="stats" id="ocrSummaryStats">
+          <div class="stat"><div class="k">总调用次数</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">总成功次数</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">总失败次数</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">总计费次数</div><div class="v">-</div></div>
+        </div>
+        <div class="cards" id="ocrAccountCards"></div>
       </div>
 
       <div class="panel">
         <h2>快速入口</h2>
-        <p class="sub">调试时最常用的三个接口。当前请求策略是“优先剩余小时最多的账号”，并带 3 分钟的短时预扣减，避免短时间内一直打同一个号。</p>
+        <p class="sub">调试时最常用的三个接口。对外统一建议走 <code>POST /transcribe</code>；图片 URL 会自动识别，也可以显式传 <code>task=image</code>。<code>/ocr</code> 仅保留兼容。当前用量查询针对腾讯 ASR。账号选择策略是“优先剩余小时最多的账号”，并带 3 分钟的短时预扣减，避免短时间内一直打同一个号。</p>
         <pre>GET  /health
 GET  /tencent/quota
-POST /transcribe
-POST /ocr</pre>
+POST /transcribe</pre>
         <pre>curl --noproxy '*' -s 'http://127.0.0.1:8014/tencent/quota'
 
 curl --noproxy '*' -s \
@@ -407,12 +464,18 @@ curl --noproxy '*' -s \
           <h3>API 文档</h3>
           <p><strong>1.</strong> 健康检查：<code>GET /health</code></p>
           <p><strong>2.</strong> 用量查询：<code>GET /tencent/quota</code></p>
-          <p><strong>3.</strong> 音频转写：<code>POST /transcribe</code></p>
-          <p><strong>4.</strong> 图片识别：<code>POST /ocr</code></p>
+          <p><strong>3.</strong> 通用转文字：<code>POST /transcribe</code>（音频 / 图片统一入口）</p>
           <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
   -H 'Content-Type: application/json' \
   -d '{
     "url": "https://example.com/demo.mp3",
+    "raw": true
+  }'</pre>
+          <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.jpg",
+    "task": "image",
     "raw": true
   }'</pre>
         </article>
@@ -420,7 +483,7 @@ curl --noproxy '*' -s \
           <h3>配置注册文档</h3>
           <p><strong>1.</strong> 从模板复制配置：</p>
           <pre>cp transcribe_config.template.json transcribe_config.json</pre>
-          <p><strong>2.</strong> 在 <code>asr.tencent.accounts</code> 里配置多个腾讯账号。</p>
+          <p><strong>2.</strong> 在 <code>asr.tencent.accounts</code> 里配置多个腾讯账号，语音转写和图片 OCR 都会复用这组腾讯密钥。</p>
           <p><strong>3.</strong> 每个账号建议填写。你现在这类测试号如果是“每月免费 10 小时”，就填 <code>monthly_quota_seconds: 36000</code>：</p>
           <pre>{
   "name": "account-1",
@@ -446,6 +509,12 @@ curl --noproxy '*' -s \
     const statusLine = document.getElementById('statusLine');
     const summaryStats = document.getElementById('summaryStats');
     const accountCards = document.getElementById('accountCards');
+    const ocrSummaryStats = document.getElementById('ocrSummaryStats');
+    const ocrAccountCards = document.getElementById('ocrAccountCards');
+    const queryRangeEl = document.getElementById('queryRange');
+    const queryBizNamesEl = document.getElementById('queryBizNames');
+    const queryStrategyEl = document.getElementById('queryStrategy');
+    const queryNoteEl = document.getElementById('queryNote');
 
     startDateEl.value = formatDate(firstDay);
     endDateEl.value = formatDate(today);
@@ -464,11 +533,20 @@ curl --noproxy '*' -s \
     }
 
     function renderSummary(data) {
+      const bizNames = (data.biz_names || []).join(', ') || '-';
       summaryStats.innerHTML = `
         <div class="stat"><div class="k">账号数</div><div class="v">${fmtNumber(data.account_count)}</div></div>
+        <div class="stat"><div class="k">查询业务</div><div class="v">${bizNames}</div></div>
         <div class="stat"><div class="k">总已用小时</div><div class="v">${fmtHours(data.total_used_duration_hours)}</div></div>
         <div class="stat"><div class="k">总调用次数</div><div class="v">${fmtNumber(data.total_used_count)}</div></div>
       `;
+    }
+
+    function renderQueryMeta(data) {
+      queryRangeEl.textContent = `${data.start_date || '-'} 到 ${data.end_date || '-'}`;
+      queryBizNamesEl.textContent = (data.biz_names || []).join(', ') || '-';
+      queryStrategyEl.textContent = data.selection_strategy || '-';
+      queryNoteEl.textContent = data.note || '当前页展示的是 /tencent/quota 返回结果。';
     }
 
     function renderAccounts(accounts) {
@@ -502,6 +580,46 @@ curl --noproxy '*' -s \
       }).join('');
     }
 
+    function renderOcrSummary(data) {
+      ocrSummaryStats.innerHTML = `
+        <div class="stat"><div class="k">总调用次数</div><div class="v">${fmtNumber(data.total_call_count)}</div></div>
+        <div class="stat"><div class="k">总成功次数</div><div class="v">${fmtNumber(data.total_success_count)}</div></div>
+        <div class="stat"><div class="k">总失败次数</div><div class="v">${fmtNumber(data.total_fail_count)}</div></div>
+        <div class="stat"><div class="k">总计费次数</div><div class="v">${fmtNumber(data.total_billed_count)}</div></div>
+      `;
+    }
+
+    function renderOcrAccounts(accounts) {
+      ocrAccountCards.innerHTML = accounts.map((account) => {
+        const interfaces = (account.interfaces || []).map((item) => {
+          return `<div>${item.interface_name || item.interface_en_name || '-'}：${fmtNumber(item.call_count)} 次</div>`;
+        }).join('') || '<div>暂无官方 OCR 调用记录</div>';
+        const errorBlock = account.error ? `<div class="status-line error">${account.error}</div>` : '';
+        return `
+          <article class="account">
+            <div class="account-head">
+              <div>
+                <div style="font-size: 20px; font-weight: 700;">${account.name}</div>
+                <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">${account.secret_id_masked} · ${account.region}</div>
+              </div>
+              <span class="pill ${Number(account.call_count || 0) > 0 ? 'good' : 'warn'}">${fmtNumber(account.call_count || 0)} 次</span>
+            </div>
+            <div class="meta">
+              <div>成功：${fmtNumber(account.success_count || 0)}</div>
+              <div>失败：${fmtNumber(account.fail_count || 0)}</div>
+              <div>计费：${fmtNumber(account.billed_count || 0)}</div>
+              <div>子账号：${(account.sub_uins || []).join(', ') || '-'}</div>
+            </div>
+            <div class="query-meta" style="margin-top: 14px;">
+              <h3 style="margin: 0 0 10px; font-size: 15px;">接口明细</h3>
+              <div class="query-meta-grid">${interfaces}</div>
+            </div>
+            ${errorBlock}
+          </article>
+        `;
+      }).join('');
+    }
+
     async function loadQuota() {
       refreshBtn.disabled = true;
       setStatus('正在刷新腾讯云用量...');
@@ -519,11 +637,17 @@ curl --noproxy '*' -s \
         }
         const data = await response.json();
         renderSummary(data);
+        renderQueryMeta(data);
         renderAccounts(data.accounts || []);
-        setStatus(`已更新 ${data.start_date} 到 ${data.end_date} 的用量。`);
+        renderOcrSummary(data.ocr_usage || {});
+        renderOcrAccounts((data.ocr_usage || {}).accounts || []);
+        setStatus(`已更新 ${data.start_date} 到 ${data.end_date} 的用量，业务类型：${(data.biz_names || []).join(', ') || '-'}`);
       } catch (error) {
-        renderSummary({ account_count: 0, total_used_duration_seconds: 0, total_used_count: 0 });
+        renderSummary({ account_count: 0, biz_names: [], total_used_duration_seconds: 0, total_used_count: 0 });
+        renderQueryMeta({ start_date: startDateEl.value, end_date: endDateEl.value, biz_names: [], selection_strategy: '-', note: '-' });
         accountCards.innerHTML = '';
+        renderOcrSummary({ total_call_count: 0, total_success_count: 0, total_fail_count: 0, total_billed_count: 0 });
+        ocrAccountCards.innerHTML = '';
         setStatus(`加载失败：${error.message}`, true);
       } finally {
         refreshBtn.disabled = false;

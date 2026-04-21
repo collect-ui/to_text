@@ -15,7 +15,7 @@ MODEL="${MODEL:-small}"
 LANGUAGE="${LANGUAGE:-zh}"
 DEVICE="${DEVICE:-cpu}"
 COMPUTE_TYPE="${COMPUTE_TYPE:-int8}"
-IMAGE_OCR_PROVIDER="${IMAGE_OCR_PROVIDER:-auto}"
+IMAGE_OCR_PROVIDER="${IMAGE_OCR_PROVIDER:-tencent}"
 
 export NO_PROXY="127.0.0.1,localhost"
 export no_proxy="127.0.0.1,localhost"

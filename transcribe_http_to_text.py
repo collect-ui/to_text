@@ -3,6 +3,7 @@
 """Single-file tool for transcribing one URL or running an HTTP service."""
 
 import argparse
+import base64
 import datetime
 import hashlib
 import hmac
@@ -59,6 +60,9 @@ DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
 DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
+TENCENT_OCR_ENDPOINT = 'https://ocr.tencentcloudapi.com'
+TENCENT_OCR_VERSION = '2018-11-19'
+TENCENT_OCR_USAGE_TIME_GRANULARITY_DAY = 86400
 TENCENT_USAGE_REGION_FALLBACKS = ('ap-guangzhou', 'ap-shanghai', 'ap-beijing')
 TENCENT_USAGE_CACHE_TTL_SECONDS = 300
 TENCENT_SELECTION_RESERVATION_SECONDS = 180
@@ -379,10 +383,15 @@ def _tc3_sign(secret_key: str, date: str, service: str, string_to_sign: str) -> 
     return hmac.new(secret_signing, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
 
 
-def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key: str,
-                         region: str) -> dict:
-    service = 'asr'
-    host = 'asr.tencentcloudapi.com'
+def _tencent_cloud_api_request(action: str,
+                               payload: dict,
+                               secret_id: str,
+                               secret_key: str,
+                               service: str,
+                               host: str,
+                               endpoint: str,
+                               version: str,
+                               region: str | None = None) -> dict:
     content_type = 'application/json; charset=utf-8'
     timestamp = int(time.time())
     date = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).strftime('%Y-%m-%d')
@@ -420,7 +429,7 @@ def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key:
     )
 
     req = Request(
-        TENCENT_ASR_ENDPOINT,
+        endpoint,
         data=payload_json.encode('utf-8'),
         method='POST',
     )
@@ -428,9 +437,10 @@ def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key:
     req.add_header('Content-Type', content_type)
     req.add_header('Host', host)
     req.add_header('X-TC-Action', action)
-    req.add_header('X-TC-Version', TENCENT_ASR_VERSION)
+    req.add_header('X-TC-Version', version)
     req.add_header('X-TC-Timestamp', str(timestamp))
-    req.add_header('X-TC-Region', region)
+    if region:
+        req.add_header('X-TC-Region', region)
 
     with urlopen(req, timeout=60) as response:
         body = response.read().decode('utf-8')
@@ -442,6 +452,21 @@ def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key:
         msg = err.get('Message', '')
         raise RuntimeError(f'{code}: {msg}')
     return parsed
+
+
+def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key: str,
+                         region: str) -> dict:
+    return _tencent_cloud_api_request(
+        action=action,
+        payload=payload,
+        secret_id=secret_id,
+        secret_key=secret_key,
+        service='asr',
+        host='asr.tencentcloudapi.com',
+        endpoint=TENCENT_ASR_ENDPOINT,
+        version=TENCENT_ASR_VERSION,
+        region=region,
+    )
 
 
 def get_tencent_usage_by_date(secret_id: str,
@@ -549,6 +574,136 @@ def summarize_tencent_usage(accounts: list[dict],
         'accounts': items,
         'selection_strategy': 'highest_remaining_quota_with_short_term_reservation',
         'note': 'Tencent Cloud GetUsageByDate returns usage only. remaining_quota_seconds is computed from local monthly_quota_seconds when configured.',
+    }
+
+
+def query_tencent_ocr_call_for_console(secret_id: str,
+                                       secret_key: str,
+                                       region: str,
+                                       start_time: str,
+                                       end_time: str,
+                                       time_granularity: int = TENCENT_OCR_USAGE_TIME_GRANULARITY_DAY) -> dict:
+    return _tencent_cloud_api_request(
+        action='QueryCallForConsole',
+        payload={
+            'StartTime': start_time,
+            'EndTime': end_time,
+            'TimeGranularity': int(time_granularity),
+        },
+        secret_id=secret_id,
+        secret_key=secret_key,
+        service='ocr',
+        host='ocr.tencentcloudapi.com',
+        endpoint=TENCENT_OCR_ENDPOINT,
+        version=TENCENT_OCR_VERSION,
+        region=region,
+    )
+
+
+def _sum_numeric_list(values: object) -> int:
+    if not isinstance(values, list):
+        return 0
+    total = 0
+    for item in values:
+        try:
+            total += int(item or 0)
+        except Exception:
+            continue
+    return total
+
+
+def summarize_tencent_ocr_usage(accounts: list[dict],
+                                start_date: str,
+                                end_date: str) -> dict:
+    start_time = f'{start_date} 00:00:00'
+    end_time = f'{end_date} 23:59:59'
+    items: list[dict] = []
+    total_call_count = 0
+    total_success_count = 0
+    total_fail_count = 0
+    total_billed_count = 0
+
+    for idx, account in enumerate(accounts):
+        current = {
+            'name': account.get('name') or f'account-{idx + 1}',
+            'secret_id_masked': _mask_secret(str(account.get('secret_id') or '')),
+            'region': account.get('region') or 'ap-beijing',
+            'start_date': start_date,
+            'end_date': end_date,
+            'start_time': start_time,
+            'end_time': end_time,
+        }
+        try:
+            resp = query_tencent_ocr_call_for_console(
+                secret_id=str(account.get('secret_id') or ''),
+                secret_key=str(account.get('secret_key') or ''),
+                region=str(account.get('region') or 'ap-beijing'),
+                start_time=start_time,
+                end_time=end_time,
+            )
+            body = resp.get('Response') or {}
+            detail_list = body.get('CallDetailList') or []
+            interface_map: dict[tuple[str, str], dict] = {}
+            account_call_count = 0
+            account_success_count = 0
+            account_fail_count = 0
+            account_billed_count = 0
+            for item in detail_list:
+                if not isinstance(item, dict):
+                    continue
+                interface_en_name = str(item.get('InterfaceEnName') or '')
+                interface_name = str(item.get('InterfaceName') or '')
+                key = (interface_en_name, interface_name)
+                entry = interface_map.setdefault(key, {
+                    'interface_en_name': interface_en_name,
+                    'interface_name': interface_name,
+                    'service_name': str(item.get('ServiceName') or ''),
+                    'interface_code': str(item.get('InterfaceCode') or ''),
+                    'call_count': 0,
+                    'success_count': 0,
+                    'fail_count': 0,
+                    'billed_count': 0,
+                })
+                entry['call_count'] += _sum_numeric_list(item.get('CallNum'))
+                entry['success_count'] += _sum_numeric_list(item.get('SuccessNum'))
+                entry['fail_count'] += _sum_numeric_list(item.get('FailNum'))
+                entry['billed_count'] += _sum_numeric_list(item.get('PidNum'))
+            interfaces = sorted(interface_map.values(), key=lambda item: (-int(item['call_count']), item['interface_name']))
+            for item in interfaces:
+                account_call_count += int(item['call_count'])
+                account_success_count += int(item['success_count'])
+                account_fail_count += int(item['fail_count'])
+                account_billed_count += int(item['billed_count'])
+            current['sub_uins'] = [str(item.get('SubUin') or '') for item in (body.get('SubUinInfoList') or []) if isinstance(item, dict)]
+            current['interfaces'] = interfaces
+            current['call_count'] = account_call_count
+            current['success_count'] = account_success_count
+            current['fail_count'] = account_fail_count
+            current['billed_count'] = account_billed_count
+            current['request_id'] = body.get('RequestId')
+            total_call_count += account_call_count
+            total_success_count += account_success_count
+            total_fail_count += account_fail_count
+            total_billed_count += account_billed_count
+        except Exception as exc:
+            current['error'] = str(exc)
+        items.append(current)
+
+    return {
+        'status': 'ok',
+        'provider': 'tencent-ocr-console',
+        'start_date': start_date,
+        'end_date': end_date,
+        'start_time': start_time,
+        'end_time': end_time,
+        'time_granularity_seconds': TENCENT_OCR_USAGE_TIME_GRANULARITY_DAY,
+        'account_count': len(items),
+        'total_call_count': total_call_count,
+        'total_success_count': total_success_count,
+        'total_fail_count': total_fail_count,
+        'total_billed_count': total_billed_count,
+        'accounts': items,
+        'note': 'Tencent OCR QueryCallForConsole returns official console usage stats. It does not provide remaining free quota in this response.',
     }
 
 
@@ -792,19 +947,109 @@ def extract_text_with_paddleocr(path: Path) -> str:
     return '\n'.join(lines).strip()
 
 
+def extract_text_with_tencent(path: Path,
+                              secret_id: str,
+                              secret_key: str,
+                              region: str,
+                              action: str = 'GeneralAccurateOCR') -> tuple[str, dict]:
+    if not secret_id or not secret_key:
+        raise RuntimeError('Tencent OCR credentials missing: set tencent.secret_id / tencent.secret_key')
+
+    image_base64 = base64.b64encode(path.read_bytes()).decode('ascii')
+    payload = {'ImageBase64': image_base64}
+    if action == 'GeneralAccurateOCR':
+        payload.update({
+            'EnableDetectSplit': True,
+            'EnableDetectText': True,
+            'IsWords': False,
+            'ConfigID': 'OCR',
+        })
+
+    response = _tencent_cloud_api_request(
+        action=action,
+        payload=payload,
+        secret_id=secret_id,
+        secret_key=secret_key,
+        service='ocr',
+        host='ocr.tencentcloudapi.com',
+        endpoint=TENCENT_OCR_ENDPOINT,
+        version=TENCENT_OCR_VERSION,
+        region=region,
+    )
+    body = response.get('Response') or {}
+    lines: list[str] = []
+    for item in body.get('TextDetections') or []:
+        text = str((item or {}).get('DetectedText') or '').strip()
+        if text:
+            lines.append(text)
+    return '\n'.join(lines).strip(), body
+
+
+def _select_tencent_credential_for_ocr(tencent_secret_id: str,
+                                       tencent_secret_key: str,
+                                       tencent_region: str,
+                                       tencent_account_pool: TencentCredentialPool | None) -> tuple[str, str, str, dict | None]:
+    effective_secret_id = (tencent_secret_id or '').strip()
+    effective_secret_key = (tencent_secret_key or '').strip()
+    effective_region = (tencent_region or 'ap-beijing').strip()
+    selected_account = None
+    if effective_secret_id and effective_secret_key:
+        return effective_secret_id, effective_secret_key, effective_region, selected_account
+    if tencent_account_pool is not None:
+        selected_account = tencent_account_pool.next_account()
+        if selected_account is not None:
+            effective_secret_id = str(selected_account.get('secret_id') or '').strip()
+            effective_secret_key = str(selected_account.get('secret_key') or '').strip()
+            effective_region = str(selected_account.get('region') or effective_region or 'ap-beijing').strip()
+    return effective_secret_id, effective_secret_key, effective_region, selected_account
+
+
 def extract_text_from_image(path: Path, url: str, provider: str,
                            ai_model: str, ai_endpoint: str,
-                           ai_timeout: int, ai_api_key: str | None) -> Tuple[str, str]:
+                           ai_timeout: int, ai_api_key: str | None,
+                           tencent_secret_id: str,
+                           tencent_secret_key: str,
+                           tencent_region: str,
+                           tencent_account_pool: TencentCredentialPool | None) -> tuple[str, str, dict]:
     provider = (provider or 'auto').lower()
     ai_api_key = (ai_api_key or '').strip()
     local_text = ''
     local_provider: str | None = None
+    metadata: dict = {}
+
+    if provider in {'auto', 'tencent'}:
+        effective_secret_id, effective_secret_key, effective_region, selected_account = _select_tencent_credential_for_ocr(
+            tencent_secret_id,
+            tencent_secret_key,
+            tencent_region,
+            tencent_account_pool,
+        )
+        try:
+            text, tencent_meta = extract_text_with_tencent(
+                path,
+                secret_id=effective_secret_id,
+                secret_key=effective_secret_key,
+                region=effective_region,
+            )
+            metadata = {
+                'tencent_request_id': tencent_meta.get('RequestId'),
+                'tencent_angle': tencent_meta.get('Angle'),
+                'tencent_region': effective_region,
+            }
+            if selected_account is not None:
+                metadata['tencent_account_name'] = selected_account.get('name') or 'default'
+                metadata['tencent_secret_id_masked'] = _mask_secret(effective_secret_id)
+                metadata['tencent_selection_strategy'] = selected_account.get('_selection_strategy', 'round_robin')
+            return text, 'tencent-ocr', metadata
+        except Exception as err:
+            if provider == 'tencent':
+                raise RuntimeError(f'Tencent OCR failed: {err}')
 
     if provider in {'auto', 'paddleocr'}:
         try:
             text = extract_text_with_paddleocr(path)
             if provider == 'paddleocr' or text:
-                return text, 'paddleocr'
+                return text, 'paddleocr', metadata
             local_text = local_text or text
             local_provider = local_provider or 'paddleocr'
         except Exception as err:
@@ -820,7 +1065,7 @@ def extract_text_from_image(path: Path, url: str, provider: str,
                             text = pytesseract.image_to_string(binary, lang=preferred)
                         except Exception:
                             text = pytesseract.image_to_string(binary, lang='eng')
-                        return text.strip(), 'pytesseract-fallback'
+                        return text.strip(), 'pytesseract-fallback', metadata
                     finally:
                         raw.close()
                 raise RuntimeError(f'PaddleOCR failed: {err}')
@@ -848,17 +1093,17 @@ def extract_text_from_image(path: Path, url: str, provider: str,
                 local_text = text
                 local_provider = 'pytesseract'
                 if provider == 'pytesseract':
-                    return text, 'pytesseract'
+                    return text, 'pytesseract', metadata
                 # auto mode: if AI is unavailable, return local OCR result directly.
                 if len(text) >= 4 or not ai_api_key:
-                    return text, 'pytesseract'
+                    return text, 'pytesseract', metadata
             finally:
                 raw.close()
 
     if provider in {'auto', 'ai'}:
         if not ai_api_key:
             if provider == 'auto' and local_provider:
-                return local_text, local_provider
+                return local_text, local_provider, metadata
             raise RuntimeError('AI OCR not configured: set OCR_API_KEY (or OPENAI_API_KEY) and OCR_API_ENDPOINT')
         try:
             return extract_text_with_openai(
@@ -867,15 +1112,15 @@ def extract_text_from_image(path: Path, url: str, provider: str,
                 ai_api_key,
                 ai_endpoint,
                 ai_timeout,
-            ), 'ai'
+            ), 'ai', metadata
         except Exception as err:
             if provider == 'auto' and local_provider:
                 # Keep service available even when remote OCR endpoint fails.
-                return local_text, f'{local_provider}-fallback'
+                return local_text, f'{local_provider}-fallback', metadata
             raise RuntimeError(f'AI OCR request failed: {err}')
 
     if provider == 'auto' and local_provider:
-        return local_text, local_provider
+        return local_text, local_provider, metadata
 
     raise RuntimeError(f'Unsupported OCR provider: {provider}')
 
@@ -1120,7 +1365,7 @@ def transcribe_url(url: str,
         resolved_task = detect_task(url, content_type, task, tmp_path)
 
         if resolved_task == 'image':
-            text, used_provider = extract_text_from_image(
+            text, used_provider, image_meta = extract_text_from_image(
                 tmp_path,
                 url,
                 image_ocr_provider,
@@ -1128,8 +1373,12 @@ def transcribe_url(url: str,
                 ai_endpoint,
                 ai_timeout,
                 ai_api_key,
+                tencent_secret_id,
+                tencent_secret_key,
+                tencent_region,
+                tencent_account_pool,
             )
-            return {
+            result = {
                 'url': url,
                 'status': 'ok',
                 'task': 'image',
@@ -1142,6 +1391,8 @@ def transcribe_url(url: str,
                 'transcription_source': str(tmp_path),
                 'cache_hit': False,
             }
+            result.update(image_meta)
+            return result
 
         if asr_provider == 'tencent':
             selected_account = None
@@ -1273,9 +1524,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--language', default='zh',
                         help='Language code, e.g. zh/en. Empty to auto-detect')
     parser.add_argument('--image-ocr-provider',
-                        default=os.getenv('IMAGE_OCR_PROVIDER', 'auto'),
-                        choices=['auto', 'pytesseract', 'paddleocr', 'ai'],
-                        help='Image OCR provider: auto/paddleocr/pytesseract/ai')
+                        default=os.getenv('IMAGE_OCR_PROVIDER', 'tencent'),
+                        choices=['auto', 'tencent', 'pytesseract', 'paddleocr', 'ai'],
+                        help='Image OCR provider: tencent/auto/paddleocr/pytesseract/ai')
     parser.add_argument('--ocr-api-endpoint',
                         default=os.getenv('OCR_API_ENDPOINT', DEFAULT_AI_OCR_ENDPOINT),
                         help='AI OCR endpoint')
@@ -1545,6 +1796,7 @@ def serve_command(args: argparse.Namespace) -> int:
                         summary = pool.quota_summary(force_refresh=force_refresh)
                     else:
                         summary = summarize_tencent_usage(accounts, start_date, end_date, biz_names)
+                    summary['ocr_usage'] = summarize_tencent_ocr_usage(accounts, start_date, end_date)
                     self._json_resp(summary)
                     return
                 self._error(404, 'Not Found')
@@ -1652,7 +1904,7 @@ def serve_command(args: argparse.Namespace) -> int:
     Handler.server_ctx['model_pool'] = model_pool
 
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f'Started service at http://{host}:{port}/transcribe or /ocr')
+    print(f'Started service at http://{host}:{port}/transcribe (/ocr kept as compatibility alias)')
     try:
         server.serve_forever()
     except KeyboardInterrupt:

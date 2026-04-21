@@ -3,8 +3,8 @@
 音频/图片 URL 转文本服务，支持：
 - 音频转写（`Tencent Cloud ASR`，默认）
 - 音频转写（`faster-whisper`，可切换）
-- 图片 OCR（`PaddleOCR` / `pytesseract` / AI 视觉模型）
-- HTTP API（`/health`、`/transcribe`、`/ocr`、`/tencent/quota`）
+- 图片 OCR（`Tencent Cloud OCR`，默认；可切换 `PaddleOCR` / `pytesseract` / AI 视觉模型）
+- HTTP API（`/health`、`/transcribe`、`/tencent/quota`；`/ocr` 仅兼容保留）
 
 ## 1. 项目结构
 
@@ -53,7 +53,8 @@ cd /data/project/to_text
 
 ### 2.3 图片 OCR 模型
 
-- 本地 OCR（推荐）：`PaddleOCR`（`lang=ch`）
+- 默认云端 OCR：`Tencent Cloud OCR`（`GeneralAccurateOCR`，复用腾讯密钥）
+- 本地 OCR：`PaddleOCR`（`lang=ch`）
 - 本地兼容：`pytesseract`
 - 云端 OCR：OpenAI 兼容接口（默认 `gpt-4o-mini`）
 
@@ -109,7 +110,16 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 - `GET /health`
 - `GET /tencent/quota`
 - `POST /transcribe`
-- `POST /ocr`
+
+图片与音频统一走 `POST /transcribe`：
+- 音频 URL：自动识别为 `audio`
+- 图片 URL：自动识别为 `image`
+- 也可显式传 `task=image`
+- `POST /ocr` 仅作为兼容别名保留
+
+`GET /tencent/quota` 当前会同时返回：
+- ASR 用量汇总（`asr_rec` 等）
+- OCR 官方控制台调用统计（字段 `ocr_usage`，来自 `QueryCallForConsole`）
 
 ### 5.1 转写结果缓存（默认开启）
 
