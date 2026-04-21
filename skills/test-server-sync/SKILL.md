@@ -42,5 +42,5 @@ bash scripts/sync_restart_verify.sh --verify-only
 ## Notes
 
 - This server is test-only.
-- `transcribe_config.json` in git is a template; script keeps default provider `tencent` and `res_text_format=3` on remote.
+- `transcribe_config.template.json` is committed as the template; remote deploy should materialize `transcribe_config.json` before restart.
 - Script uses `sshpass` when available; otherwise it falls back to interactive SSH instructions.

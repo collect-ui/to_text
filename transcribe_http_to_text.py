@@ -19,7 +19,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, Literal, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -58,6 +58,7 @@ DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
 DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
+TENCENT_USAGE_REGION_FALLBACKS = ('ap-guangzhou', 'ap-shanghai', 'ap-beijing')
 
 
 def _deep_update(dst: dict, src: dict) -> dict:
@@ -103,7 +104,63 @@ def _load_runtime_config(path: Path) -> dict:
     return defaults
 
 
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ''
+    if len(value) <= 8:
+        return '*' * len(value)
+    return f'{value[:4]}***{value[-4:]}'
+
+
+def _normalize_tencent_accounts(raw_accounts: object, fallback_account: dict) -> list[dict]:
+    accounts: list[dict] = []
+    if isinstance(raw_accounts, list):
+        for idx, item in enumerate(raw_accounts):
+            if not isinstance(item, dict):
+                continue
+            account = {
+                'name': str(item.get('name') or f'account-{idx + 1}'),
+                'secret_id': str(item.get('secret_id') or '').strip(),
+                'secret_key': str(item.get('secret_key') or '').strip(),
+                'region': str(item.get('region') or fallback_account.get('region') or 'ap-beijing').strip(),
+                'monthly_quota_seconds': int(item.get('monthly_quota_seconds') or 0),
+            }
+            if account['secret_id'] and account['secret_key']:
+                accounts.append(account)
+
+    if accounts:
+        return accounts
+
+    fallback = {
+        'name': 'default',
+        'secret_id': str(fallback_account.get('secret_id') or '').strip(),
+        'secret_key': str(fallback_account.get('secret_key') or '').strip(),
+        'region': str(fallback_account.get('region') or 'ap-beijing').strip(),
+        'monthly_quota_seconds': int(fallback_account.get('monthly_quota_seconds') or 0),
+    }
+    if fallback['secret_id'] and fallback['secret_key']:
+        return [fallback]
+    return []
+
+
+class TencentCredentialPool:
+    def __init__(self, accounts: list[dict]):
+        self._accounts = [dict(item) for item in accounts if item.get('secret_id') and item.get('secret_key')]
+        self._lock = threading.Lock()
+        self._cursor = 0
+
+    def next_account(self) -> dict | None:
+        if not self._accounts:
+            return None
+        with self._lock:
+            account = dict(self._accounts[self._cursor % len(self._accounts)])
+            self._cursor = (self._cursor + 1) % len(self._accounts)
+            return account
+
+
 RUNTIME_CONFIG = _load_runtime_config(DEFAULT_CONFIG_FILE)
+tencent_runtime = RUNTIME_CONFIG.setdefault('asr', {}).setdefault('tencent', {})
+tencent_runtime['accounts'] = _normalize_tencent_accounts(tencent_runtime.get('accounts'), tencent_runtime)
 
 AUDIO_EXTS = {
     '.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg', '.opus', '.amr', '.mp4',
@@ -318,6 +375,109 @@ def _tencent_api_request(action: str, payload: dict, secret_id: str, secret_key:
         msg = err.get('Message', '')
         raise RuntimeError(f'{code}: {msg}')
     return parsed
+
+
+def get_tencent_usage_by_date(secret_id: str,
+                              secret_key: str,
+                              region: str,
+                              start_date: str,
+                              end_date: str,
+                              biz_names: list[str] | None = None) -> dict:
+    return _tencent_api_request(
+        action='GetUsageByDate',
+        payload={
+            'BizNameList': biz_names or ['asr_rec'],
+            'StartDate': start_date,
+            'EndDate': end_date,
+        },
+        secret_id=secret_id,
+        secret_key=secret_key,
+        region=region,
+    )
+
+
+def get_tencent_usage_by_date_with_fallback(secret_id: str,
+                                            secret_key: str,
+                                            region: str,
+                                            start_date: str,
+                                            end_date: str,
+                                            biz_names: list[str] | None = None) -> tuple[dict, str]:
+    tried: list[str] = []
+    for current_region in [region, *TENCENT_USAGE_REGION_FALLBACKS]:
+        current_region = (current_region or '').strip()
+        if not current_region or current_region in tried:
+            continue
+        tried.append(current_region)
+        try:
+            return (
+                get_tencent_usage_by_date(
+                    secret_id=secret_id,
+                    secret_key=secret_key,
+                    region=current_region,
+                    start_date=start_date,
+                    end_date=end_date,
+                    biz_names=biz_names,
+                ),
+                current_region,
+            )
+        except Exception as exc:
+            if 'UnsupportedRegion' not in str(exc):
+                raise
+    raise RuntimeError(f'UnsupportedRegion for usage query, tried={",".join(tried)}')
+
+
+def summarize_tencent_usage(accounts: list[dict],
+                            start_date: str,
+                            end_date: str,
+                            biz_names: list[str] | None = None) -> dict:
+    requested_biz_names = biz_names or ['asr_rec']
+    items: list[dict] = []
+    total_duration = 0
+    total_count = 0
+    for idx, account in enumerate(accounts):
+        current = {
+            'name': account.get('name') or f'account-{idx + 1}',
+            'secret_id_masked': _mask_secret(str(account.get('secret_id') or '')),
+            'region': account.get('region') or 'ap-beijing',
+            'monthly_quota_seconds': int(account.get('monthly_quota_seconds') or 0),
+            'start_date': start_date,
+            'end_date': end_date,
+            'biz_names': requested_biz_names,
+        }
+        try:
+            resp, used_region = get_tencent_usage_by_date_with_fallback(
+                secret_id=str(account.get('secret_id') or ''),
+                secret_key=str(account.get('secret_key') or ''),
+                region=str(account.get('region') or 'ap-beijing'),
+                start_date=start_date,
+                end_date=end_date,
+                biz_names=requested_biz_names,
+            )
+            usage_list = (((resp.get('Response') or {}).get('Data') or {}).get('UsageByDateInfoList') or [])
+            current['usage_region'] = used_region
+            used_duration = sum(int(item.get('Duration') or 0) for item in usage_list if isinstance(item, dict))
+            used_count = sum(int(item.get('Count') or 0) for item in usage_list if isinstance(item, dict))
+            current['usage'] = usage_list
+            current['used_duration_seconds'] = used_duration
+            current['used_count'] = used_count
+            if current['monthly_quota_seconds'] > 0:
+                current['remaining_quota_seconds'] = max(0, current['monthly_quota_seconds'] - used_duration)
+            total_duration += used_duration
+            total_count += used_count
+        except Exception as exc:
+            current['error'] = str(exc)
+        items.append(current)
+    return {
+        'status': 'ok',
+        'start_date': start_date,
+        'end_date': end_date,
+        'biz_names': requested_biz_names,
+        'account_count': len(items),
+        'total_used_duration_seconds': total_duration,
+        'total_used_count': total_count,
+        'accounts': items,
+        'note': 'Tencent Cloud GetUsageByDate returns usage only. remaining_quota_seconds is computed from local monthly_quota_seconds when configured.',
+    }
 
 
 def transcribe_with_tencent(url: str,
@@ -864,6 +1024,7 @@ def transcribe_url(url: str,
                    tencent_filter_dirty: int,
                    tencent_poll_interval: int,
                    tencent_poll_timeout: int,
+                   tencent_account_pool: TencentCredentialPool | None,
                    task: str,
                    image_ocr_provider: str,
                    ai_model: str,
@@ -911,12 +1072,22 @@ def transcribe_url(url: str,
             }
 
         if asr_provider == 'tencent':
+            selected_account = None
+            effective_secret_id = tencent_secret_id
+            effective_secret_key = tencent_secret_key
+            effective_region = tencent_region
+            if not effective_secret_id or not effective_secret_key:
+                selected_account = tencent_account_pool.next_account() if tencent_account_pool is not None else None
+                if selected_account is not None:
+                    effective_secret_id = str(selected_account.get('secret_id') or '')
+                    effective_secret_key = str(selected_account.get('secret_key') or '')
+                    effective_region = str(selected_account.get('region') or effective_region or 'ap-beijing')
             result = transcribe_with_tencent(
                 url=url,
                 language=language,
-                tencent_secret_id=tencent_secret_id,
-                tencent_secret_key=tencent_secret_key,
-                tencent_region=tencent_region,
+                tencent_secret_id=effective_secret_id,
+                tencent_secret_key=effective_secret_key,
+                tencent_region=effective_region,
                 tencent_engine_model_type=tencent_engine_model_type,
                 tencent_channel_num=tencent_channel_num,
                 tencent_res_text_format=tencent_res_text_format,
@@ -935,6 +1106,10 @@ def transcribe_url(url: str,
                     result_cache.put(url, result)
                 except Exception:
                     pass
+            if selected_account is not None:
+                result['tencent_account_name'] = selected_account.get('name') or 'default'
+                result['tencent_secret_id_masked'] = _mask_secret(effective_secret_id)
+                result['tencent_region'] = effective_region
             result['cache_hit'] = False
             return result
 
@@ -1169,6 +1344,7 @@ def run_transcribe_command(args: argparse.Namespace) -> int:
         tencent_filter_dirty=args.tencent_filter_dirty,
         tencent_poll_interval=args.tencent_poll_interval,
         tencent_poll_timeout=args.tencent_poll_timeout,
+        tencent_account_pool=TencentCredentialPool(RUNTIME_CONFIG['asr']['tencent'].get('accounts', [])),
         task=args.task,
         image_ocr_provider=args.image_ocr_provider,
         ai_model=args.ocr_model,
@@ -1217,6 +1393,7 @@ def serve_command(args: argparse.Namespace) -> int:
         'tencent_filter_dirty': args.tencent_filter_dirty,
         'tencent_poll_interval': args.tencent_poll_interval,
         'tencent_poll_timeout': args.tencent_poll_timeout,
+        'tencent_accounts': [dict(item) for item in RUNTIME_CONFIG['asr']['tencent'].get('accounts', [])],
         'task': args.task,
         'image_ocr_provider': args.image_ocr_provider,
         'ai_model': args.ocr_model,
@@ -1233,6 +1410,7 @@ def serve_command(args: argparse.Namespace) -> int:
             'model_pool': model_pool,
             'result_cache': cache,
             'defaults': defaults,
+            'tencent_account_pool': TencentCredentialPool(defaults['tencent_accounts']),
         }
 
         def _json_resp(self, payload: Dict, status: int = 200) -> None:
@@ -1251,6 +1429,20 @@ def serve_command(args: argparse.Namespace) -> int:
             try:
                 if self.path == '/health':
                     self._json_resp({'status': 'ok'})
+                    return
+                parsed = urlparse(self.path)
+                if parsed.path == '/tencent/quota':
+                    cfg = self.server_ctx['defaults']
+                    accounts = cfg.get('tencent_accounts') or []
+                    if not accounts:
+                        self._error(400, 'Tencent account pool not configured')
+                        return
+                    params = parse_qs(parsed.query or '')
+                    start_date = (params.get('start_date') or [datetime.date.today().replace(day=1).isoformat()])[0]
+                    end_date = (params.get('end_date') or [datetime.date.today().isoformat()])[0]
+                    biz_names_raw = (params.get('biz_names') or ['asr_rec'])[0]
+                    biz_names = [item.strip() for item in biz_names_raw.split(',') if item.strip()]
+                    self._json_resp(summarize_tencent_usage(accounts, start_date, end_date, biz_names))
                     return
                 self._error(404, 'Not Found')
             except Exception:
@@ -1332,6 +1524,7 @@ def serve_command(args: argparse.Namespace) -> int:
                     tencent_filter_dirty=int(payload.get('tencent_filter_dirty', cfg['tencent_filter_dirty'])),
                     tencent_poll_interval=int(payload.get('tencent_poll_interval', cfg['tencent_poll_interval'])),
                     tencent_poll_timeout=int(payload.get('tencent_poll_timeout', cfg['tencent_poll_timeout'])),
+                    tencent_account_pool=self.server_ctx['tencent_account_pool'],
                     task=payload.get('task') or ('image' if self.path == '/ocr' else cfg['task']),
                     image_ocr_provider=payload.get('image_ocr_provider', cfg['image_ocr_provider']),
                     ai_model=payload.get('ocr_model', cfg['ai_model']),

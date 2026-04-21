@@ -15,6 +15,12 @@ curl -s http://127.0.0.1:8014/health
 {"status":"ok"}
 ```
 
+腾讯云账号用量查询：
+```bash
+curl -s 'http://127.0.0.1:8014/tencent/quota'
+curl -s 'http://127.0.0.1:8014/tencent/quota?start_date=2026-04-01&end_date=2026-04-21'
+```
+
 ## 2. 音频转写 `/transcribe`
 
 请求：
@@ -95,14 +101,24 @@ curl -s -X POST 'http://127.0.0.1:8014/ocr' \
 - `ocr_api_key`：AI OCR key
 - `raw`：`true` 时返回原始结构
 - `audio_chunk_seconds`：音频分段秒数；`0` 为不分段（默认）
-- `asr_provider`：`local|tencent`，默认读取 `transcribe_config.json`（当前默认 `tencent`）
+- `asr_provider`：`local|tencent`，默认读取运行时配置 `transcribe_config.json`（模板文件为 `transcribe_config.template.json`）
 - `cache_hit`（响应字段，仅 `raw=true` 时可见）：是否命中本地缓存
 - `tencent_secret_id` / `tencent_secret_key`：单次请求覆盖腾讯云密钥
+- `asr.tencent.accounts`：服务级多账号池，未显式传单次密钥时按账号轮询
 - `tencent_region`：默认 `ap-beijing`
 - `tencent_engine_model_type`：默认 `16k_zh`
 - `tencent_res_text_format`：当前默认 `3`
 - `tencent_quality_mode`：`standard|max`，默认 `standard`
 - `tencent_filter_modal`：当前默认 `1`
+
+`GET /tencent/quota` 查询参数：
+- `start_date`：开始日期，默认当月 `1` 号
+- `end_date`：结束日期，默认今天
+- `biz_names`：逗号分隔，默认 `asr_rec`
+
+注意：
+- 接口底层调用腾讯云官方 `GetUsageByDate`，返回的是“已用量”
+- 若配置了 `monthly_quota_seconds`，服务会额外返回按本地配置推算的 `remaining_quota_seconds`
 
 服务级缓存参数（CLI）：
 - `--cache-dir`：缓存目录（默认 `./cache/transcribe_result`）

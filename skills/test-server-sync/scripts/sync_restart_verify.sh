@@ -28,6 +28,9 @@ cd /data/to_text
 git fetch origin
 git checkout main
 git pull --ff-only origin main
+if [[ ! -f transcribe_config.json && -f transcribe_config.template.json ]]; then
+  cp transcribe_config.template.json transcribe_config.json
+fi
 if [[ -f transcribe_config.json ]]; then
 python3 - <<'PY'
 import json

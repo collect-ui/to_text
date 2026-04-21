@@ -4,7 +4,7 @@
 - 音频转写（`Tencent Cloud ASR`，默认）
 - 音频转写（`faster-whisper`，可切换）
 - 图片 OCR（`PaddleOCR` / `pytesseract` / AI 视觉模型）
-- HTTP API（`/health`、`/transcribe`、`/ocr`）
+- HTTP API（`/health`、`/transcribe`、`/ocr`、`/tencent/quota`）
 
 ## 1. 项目结构
 
@@ -33,9 +33,11 @@
 ### 2.2 腾讯云 ASR（默认）
 
 - 接口：`CreateRecTask` + `DescribeTaskStatus`（异步轮询）
-- 默认配置文件：`./transcribe_config.json`
+- 运行时配置文件：`./transcribe_config.json`（已忽略，不提交）
+- 配置模板：`./transcribe_config.template.json`
 - 默认模式字段：`asr.default_provider`（当前默认 `tencent`）
 - 凭证字段：`asr.tencent.secret_id`、`asr.tencent.secret_key`
+- 多账号字段：`asr.tencent.accounts`
 - 当前默认识别参数：`engine_model_type=16k_zh`、`res_text_format=3`
 
 下载方式：
@@ -105,6 +107,7 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 ## 5. API 入口
 
 - `GET /health`
+- `GET /tencent/quota`
 - `POST /transcribe`
 - `POST /ocr`
 
@@ -128,6 +131,47 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 
 ## 6. 腾讯云模式示例
 
+多账号配置示例：
+
+```json
+{
+  "asr": {
+    "default_provider": "tencent",
+    "tencent": {
+      "region": "ap-beijing",
+      "engine_model_type": "16k_zh",
+      "accounts": [
+        {
+          "name": "account-1",
+          "secret_id": "AKIDxxxxx",
+          "secret_key": "xxxxx",
+          "region": "ap-beijing",
+          "monthly_quota_seconds": 18000
+        },
+        {
+          "name": "account-2",
+          "secret_id": "AKIDyyyyy",
+          "secret_key": "yyyyy",
+          "region": "ap-beijing",
+          "monthly_quota_seconds": 18000
+        }
+      ]
+    }
+  }
+}
+```
+
+首次使用：
+
+```bash
+cp transcribe_config.template.json transcribe_config.json
+```
+
+说明：
+- 配了 `accounts` 后，腾讯转写会按账号轮询
+- 如果单次请求显式传了 `tencent_secret_id` / `tencent_secret_key`，仍然优先走请求内密钥
+- `monthly_quota_seconds` 是本地配置额度，不是腾讯云接口直接返回字段
+
 默认走配置里的 `asr.default_provider`。单次请求可覆盖：
 
 ```bash
@@ -146,6 +190,14 @@ CLI 示例：
 python3 transcribe_http_to_text.py transcribe 'https://example.com/demo.mp3' \
   --asr-provider tencent \
   --json
+```
+
+用量查询示例：
+
+```bash
+curl -s 'http://127.0.0.1:8014/tencent/quota'
+curl -s 'http://127.0.0.1:8014/tencent/quota?start_date=2026-04-01&end_date=2026-04-21'
+curl -s 'http://127.0.0.1:8014/tencent/quota?biz_names=asr_rec,asr_rt'
 ```
 
 ## 7. Git 提交说明

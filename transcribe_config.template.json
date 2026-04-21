@@ -4,6 +4,23 @@
     "tencent": {
       "secret_id": "",
       "secret_key": "",
+      "accounts": [
+        {
+          "name": "account-1",
+          "secret_id": "",
+          "secret_key": "",
+          "region": "ap-beijing",
+          "monthly_quota_seconds": 18000
+        },
+        {
+          "name": "account-2",
+          "secret_id": "",
+          "secret_key": "",
+          "region": "ap-beijing",
+          "monthly_quota_seconds": 18000
+        }
+      ],
+      "monthly_quota_seconds": 0,
       "region": "ap-beijing",
       "engine_model_type": "16k_zh",
       "channel_num": 1,
