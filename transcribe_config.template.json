@@ -10,14 +10,14 @@
           "secret_id": "",
           "secret_key": "",
           "region": "ap-beijing",
-          "monthly_quota_seconds": 18000
+          "monthly_quota_seconds": 36000
         },
         {
           "name": "account-2",
           "secret_id": "",
           "secret_key": "",
           "region": "ap-beijing",
-          "monthly_quota_seconds": 18000
+          "monthly_quota_seconds": 36000
         }
       ],
       "monthly_quota_seconds": 0,

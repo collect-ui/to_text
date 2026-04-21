@@ -60,6 +60,8 @@ DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
 TENCENT_USAGE_REGION_FALLBACKS = ('ap-guangzhou', 'ap-shanghai', 'ap-beijing')
+TENCENT_USAGE_CACHE_TTL_SECONDS = 300
+TENCENT_SELECTION_RESERVATION_SECONDS = 180
 
 
 def _deep_update(dst: dict, src: dict) -> dict:
@@ -113,6 +115,10 @@ def _mask_secret(value: str) -> str:
     return f'{value[:4]}***{value[-4:]}'
 
 
+def _seconds_to_hours(seconds: int | float) -> float:
+    return round(float(seconds or 0) / 3600.0, 2)
+
+
 def _normalize_tencent_accounts(raw_accounts: object, fallback_account: dict) -> list[dict]:
     accounts: list[dict] = []
     if isinstance(raw_accounts, list):
@@ -149,14 +155,74 @@ class TencentCredentialPool:
         self._accounts = [dict(item) for item in accounts if item.get('secret_id') and item.get('secret_key')]
         self._lock = threading.Lock()
         self._cursor = 0
+        self._usage_cache: dict | None = None
+        self._usage_cache_at = 0.0
+        self._virtual_remaining: dict[str, int] = {}
 
     def next_account(self) -> dict | None:
         if not self._accounts:
             return None
         with self._lock:
+            usage_summary = self._refresh_usage_cache_locked()
+            usage_map = {
+                str(item.get('name') or ''): item
+                for item in (usage_summary.get('accounts') or [])
+                if isinstance(item, dict)
+            } if isinstance(usage_summary, dict) else {}
+
+            quota_ready = all(int(account.get('monthly_quota_seconds') or 0) > 0 for account in self._accounts)
+            if quota_ready and len(usage_map) == len(self._accounts):
+                ranked: list[tuple[int, int, dict]] = []
+                for idx, account in enumerate(self._accounts):
+                    name = str(account.get('name') or '')
+                    usage = usage_map.get(name, {})
+                    remaining = int(usage.get('remaining_quota_seconds') or 0)
+                    if name not in self._virtual_remaining:
+                        self._virtual_remaining[name] = remaining
+                    ranked.append((self._virtual_remaining[name], -((self._cursor + idx) % len(self._accounts)), account))
+                ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+                selected = dict(ranked[0][2])
+                selected_name = str(selected.get('name') or '')
+                self._virtual_remaining[selected_name] = max(
+                    0,
+                    int(self._virtual_remaining.get(selected_name, 0)) - TENCENT_SELECTION_RESERVATION_SECONDS,
+                )
+                selected['_selection_strategy'] = 'highest_remaining_quota'
+                selected['_selection_remaining_quota_seconds'] = int(self._virtual_remaining.get(selected_name, 0))
+                self._cursor = (self._cursor + 1) % len(self._accounts)
+                return selected
+
             account = dict(self._accounts[self._cursor % len(self._accounts)])
             self._cursor = (self._cursor + 1) % len(self._accounts)
+            account['_selection_strategy'] = 'round_robin'
             return account
+
+    def quota_summary(self, force_refresh: bool = False) -> dict:
+        with self._lock:
+            if force_refresh:
+                self._usage_cache_at = 0.0
+            return dict(self._refresh_usage_cache_locked())
+
+    def _refresh_usage_cache_locked(self) -> dict:
+        now = time.time()
+        if self._usage_cache is not None and now - self._usage_cache_at < TENCENT_USAGE_CACHE_TTL_SECONDS:
+            return self._usage_cache
+
+        today = datetime.date.today()
+        summary = summarize_tencent_usage(
+            self._accounts,
+            start_date=today.replace(day=1).isoformat(),
+            end_date=today.isoformat(),
+            biz_names=['asr_rec'],
+        )
+        self._usage_cache = summary
+        self._usage_cache_at = now
+        self._virtual_remaining = {
+            str(item.get('name') or ''): int(item.get('remaining_quota_seconds') or 0)
+            for item in (summary.get('accounts') or [])
+            if isinstance(item, dict)
+        }
+        return summary
 
 
 RUNTIME_CONFIG = _load_runtime_config(DEFAULT_CONFIG_FILE)
@@ -441,6 +507,7 @@ def summarize_tencent_usage(accounts: list[dict],
             'secret_id_masked': _mask_secret(str(account.get('secret_id') or '')),
             'region': account.get('region') or 'ap-beijing',
             'monthly_quota_seconds': int(account.get('monthly_quota_seconds') or 0),
+            'monthly_quota_hours': _seconds_to_hours(int(account.get('monthly_quota_seconds') or 0)),
             'start_date': start_date,
             'end_date': end_date,
             'biz_names': requested_biz_names,
@@ -460,9 +527,11 @@ def summarize_tencent_usage(accounts: list[dict],
             used_count = sum(int(item.get('Count') or 0) for item in usage_list if isinstance(item, dict))
             current['usage'] = usage_list
             current['used_duration_seconds'] = used_duration
+            current['used_duration_hours'] = _seconds_to_hours(used_duration)
             current['used_count'] = used_count
             if current['monthly_quota_seconds'] > 0:
                 current['remaining_quota_seconds'] = max(0, current['monthly_quota_seconds'] - used_duration)
+                current['remaining_quota_hours'] = _seconds_to_hours(current['remaining_quota_seconds'])
             total_duration += used_duration
             total_count += used_count
         except Exception as exc:
@@ -475,8 +544,10 @@ def summarize_tencent_usage(accounts: list[dict],
         'biz_names': requested_biz_names,
         'account_count': len(items),
         'total_used_duration_seconds': total_duration,
+        'total_used_duration_hours': _seconds_to_hours(total_duration),
         'total_used_count': total_count,
         'accounts': items,
+        'selection_strategy': 'highest_remaining_quota_with_short_term_reservation',
         'note': 'Tencent Cloud GetUsageByDate returns usage only. remaining_quota_seconds is computed from local monthly_quota_seconds when configured.',
     }
 
@@ -1111,6 +1182,11 @@ def transcribe_url(url: str,
                 result['tencent_account_name'] = selected_account.get('name') or 'default'
                 result['tencent_secret_id_masked'] = _mask_secret(effective_secret_id)
                 result['tencent_region'] = effective_region
+                result['tencent_selection_strategy'] = selected_account.get('_selection_strategy', 'round_robin')
+                if '_selection_remaining_quota_seconds' in selected_account:
+                    result['tencent_selection_remaining_quota_hours'] = _seconds_to_hours(
+                        int(selected_account.get('_selection_remaining_quota_seconds') or 0)
+                    )
             result['cache_hit'] = False
             return result
 
@@ -1448,6 +1524,7 @@ def serve_command(args: argparse.Namespace) -> int:
                     self._json_resp({'status': 'ok'})
                     return
                 if parsed.path == '/tencent/quota':
+                    pool = self.server_ctx['tencent_account_pool']
                     cfg = self.server_ctx['defaults']
                     accounts = cfg.get('tencent_accounts') or []
                     if not accounts:
@@ -1458,7 +1535,17 @@ def serve_command(args: argparse.Namespace) -> int:
                     end_date = (params.get('end_date') or [datetime.date.today().isoformat()])[0]
                     biz_names_raw = (params.get('biz_names') or ['asr_rec'])[0]
                     biz_names = [item.strip() for item in biz_names_raw.split(',') if item.strip()]
-                    self._json_resp(summarize_tencent_usage(accounts, start_date, end_date, biz_names))
+                    force_refresh = (params.get('refresh') or ['0'])[0] in {'1', 'true', 'yes'}
+                    if (
+                        pool is not None
+                        and start_date == datetime.date.today().replace(day=1).isoformat()
+                        and end_date == datetime.date.today().isoformat()
+                        and biz_names == ['asr_rec']
+                    ):
+                        summary = pool.quota_summary(force_refresh=force_refresh)
+                    else:
+                        summary = summarize_tencent_usage(accounts, start_date, end_date, biz_names)
+                    self._json_resp(summary)
                     return
                 self._error(404, 'Not Found')
             except Exception:

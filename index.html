@@ -357,7 +357,7 @@
     <section class="grid">
       <div class="panel">
         <h2>额度看板</h2>
-        <p class="sub">按日期区间查询腾讯语音识别用量。剩余额度来自服务端按 <code>monthly_quota_seconds - 已用秒数</code> 推算。</p>
+        <p class="sub">按日期区间查询腾讯语音识别用量。首页默认展示小时，剩余额度来自服务端按 <code>monthly_quota_seconds - 已用秒数</code> 推算。</p>
         <div class="controls">
           <div>
             <label for="startDate">开始日期</label>
@@ -374,7 +374,7 @@
         </div>
         <div class="stats" id="summaryStats">
           <div class="stat"><div class="k">账号数</div><div class="v">-</div></div>
-          <div class="stat"><div class="k">总已用秒数</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">总已用小时</div><div class="v">-</div></div>
           <div class="stat"><div class="k">总调用次数</div><div class="v">-</div></div>
         </div>
         <div class="status-line" id="statusLine">正在加载用量...</div>
@@ -383,7 +383,7 @@
 
       <div class="panel">
         <h2>快速入口</h2>
-        <p class="sub">调试时最常用的三个接口。首页本身就是默认路由，不需要单独前端服务。</p>
+        <p class="sub">调试时最常用的三个接口。当前请求策略是“优先剩余小时最多的账号”，并带 3 分钟的短时预扣减，避免短时间内一直打同一个号。</p>
         <pre>GET  /health
 GET  /tencent/quota
 POST /transcribe
@@ -392,6 +392,10 @@ POST /ocr</pre>
 
 curl --noproxy '*' -s \
   'http://127.0.0.1:8014/tencent/quota?start_date=2026-04-01&end_date=2026-04-21&biz_names=asr_rec,asr_rt'</pre>
+        <pre>如果想强制刷新腾讯最新用量：
+
+curl --noproxy '*' -s \
+  'http://127.0.0.1:8014/tencent/quota?refresh=1'</pre>
       </div>
     </section>
 
@@ -417,13 +421,13 @@ curl --noproxy '*' -s \
           <p><strong>1.</strong> 从模板复制配置：</p>
           <pre>cp transcribe_config.template.json transcribe_config.json</pre>
           <p><strong>2.</strong> 在 <code>asr.tencent.accounts</code> 里配置多个腾讯账号。</p>
-          <p><strong>3.</strong> 每个账号建议填写：</p>
+          <p><strong>3.</strong> 每个账号建议填写。你现在这类测试号如果是“每月免费 10 小时”，就填 <code>monthly_quota_seconds: 36000</code>：</p>
           <pre>{
   "name": "account-1",
   "secret_id": "AKIDxxxxx",
   "secret_key": "xxxxx",
   "region": "ap-beijing",
-  "monthly_quota_seconds": 18000
+  "monthly_quota_seconds": 36000
 }</pre>
           <p><strong>4.</strong> 服务默认会按账号轮询；若请求里显式传了单次密钥，则单次密钥优先。</p>
         </article>
@@ -450,8 +454,8 @@ curl --noproxy '*' -s \
       return new Intl.NumberFormat('zh-CN').format(Number(value || 0));
     }
 
-    function fmtPercent(value) {
-      return `${Math.round(value)}%`;
+    function fmtHours(value) {
+      return `${Number(value || 0).toFixed(2)}h`;
     }
 
     function setStatus(message, isError = false) {
@@ -462,7 +466,7 @@ curl --noproxy '*' -s \
     function renderSummary(data) {
       summaryStats.innerHTML = `
         <div class="stat"><div class="k">账号数</div><div class="v">${fmtNumber(data.account_count)}</div></div>
-        <div class="stat"><div class="k">总已用秒数</div><div class="v">${fmtNumber(data.total_used_duration_seconds)}</div></div>
+        <div class="stat"><div class="k">总已用小时</div><div class="v">${fmtHours(data.total_used_duration_hours)}</div></div>
         <div class="stat"><div class="k">总调用次数</div><div class="v">${fmtNumber(data.total_used_count)}</div></div>
       `;
     }
@@ -474,7 +478,7 @@ curl --noproxy '*' -s \
         const remain = Number(account.remaining_quota_seconds || 0);
         const ratio = quota > 0 ? Math.min(100, (used / quota) * 100) : 0;
         const pillClass = remain > quota * 0.2 ? 'good' : 'warn';
-        const quotaText = quota > 0 ? `${fmtNumber(remain)} / ${fmtNumber(quota)} 秒剩余` : '未配置月额度';
+        const quotaText = quota > 0 ? `${fmtHours(account.remaining_quota_hours)} / ${fmtHours(account.monthly_quota_hours)} 剩余` : '未配置月额度';
         const errorBlock = account.error ? `<div class="status-line error">${account.error}</div>` : '';
         return `
           <article class="account">
@@ -487,7 +491,7 @@ curl --noproxy '*' -s \
             </div>
             <div class="meter"><span style="width:${ratio}%;"></span></div>
             <div class="meta">
-              <div>已用秒数：${fmtNumber(used)}</div>
+              <div>已用小时：${fmtHours(account.used_duration_hours)}</div>
               <div>调用次数：${fmtNumber(account.used_count || 0)}</div>
               <div>查询地域：${account.usage_region || '-'}</div>
               <div>业务：${(account.biz_names || []).join(', ') || '-'}</div>
