@@ -53,6 +53,7 @@ DEFAULT_LOG_FILE = SCRIPT_DIR / 'transcribe_http_to_text.log'
 DEFAULT_AI_OCR_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
 DEFAULT_AI_OCR_MODEL = 'gpt-4o-mini'
 DEFAULT_CONFIG_FILE = SCRIPT_DIR / 'transcribe_config.json'
+DEFAULT_INDEX_FILE = SCRIPT_DIR / 'index.html'
 DEFAULT_RESULT_CACHE_DIR = SCRIPT_DIR / 'cache' / 'transcribe_result'
 DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
 DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
@@ -1422,15 +1423,30 @@ def serve_command(args: argparse.Namespace) -> int:
             self.wfile.write(data)
             self.wfile.flush()
 
+        def _file_resp(self, path: Path, content_type: str, status: int = 200) -> None:
+            data = path.read_bytes()
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
+
         def _error(self, status: int, message: str) -> None:
             self._json_resp({'status': 'error', 'error': message}, status)
 
         def do_GET(self):
             try:
-                if self.path == '/health':
+                parsed = urlparse(self.path)
+                if parsed.path in {'/', '/index.html'}:
+                    if DEFAULT_INDEX_FILE.exists():
+                        self._file_resp(DEFAULT_INDEX_FILE, 'text/html; charset=utf-8')
+                    else:
+                        self._error(404, 'index.html not found')
+                    return
+                if parsed.path == '/health':
                     self._json_resp({'status': 'ok'})
                     return
-                parsed = urlparse(self.path)
                 if parsed.path == '/tencent/quota':
                     cfg = self.server_ctx['defaults']
                     accounts = cfg.get('tencent_accounts') or []
