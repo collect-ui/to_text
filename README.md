@@ -123,7 +123,7 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 
 ### 5.1 转写结果缓存（默认开启）
 
-- 仅缓存音频转写成功结果（`status=ok` 且 `task=audio`）
+- 缓存音频转写与图片 OCR 的成功结果（`status=ok` 且 `task=audio|image`）
 - 缓存键：完整 URL 完全一致
 - 默认目录：`./cache/transcribe_result`
 - 默认策略：LRU，最多 `500` 条且最多 `200MB`（任一超限都会淘汰最久未访问项）

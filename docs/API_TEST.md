@@ -57,6 +57,22 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
   }'
 ```
 
+图片 OCR 也走同一套 URL 缓存：
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.jpg",
+    "task": "image",
+    "raw": true
+  }'
+```
+
+图片 OCR 的失败熔断：
+- 同一个图片 URL 如果 OCR 失败过 1 次，后续请求会直接返回成功态的 `未知`
+- 这样客户端不会继续对同一张图反复重试
+- 一旦后续该 URL OCR 成功，失败计数会自动清零
+
 默认返回为业务封装结构：
 ```json
 {

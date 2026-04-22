@@ -58,6 +58,7 @@ DEFAULT_INDEX_FILE = SCRIPT_DIR / 'index.html'
 DEFAULT_RESULT_CACHE_DIR = SCRIPT_DIR / 'cache' / 'transcribe_result'
 DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
 DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
+DEFAULT_OCR_FAILURE_THRESHOLD = 1
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
 TENCENT_OCR_ENDPOINT = 'https://ocr.tencentcloudapi.com'
@@ -1148,13 +1149,16 @@ class ResultCache:
         self._cache_dir = cache_dir
         self._entries_dir = cache_dir / 'entries'
         self._index_file = cache_dir / 'index.json'
+        self._failure_index_file = cache_dir / 'failure_index.json'
         self._max_entries = max(1, int(max_entries))
         self._max_size_bytes = max(1, int(max_size_mb)) * 1024 * 1024
         self._lock = threading.Lock()
         self._index: Dict[str, Dict] = {}
+        self._failure_index: Dict[str, Dict] = {}
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._entries_dir.mkdir(parents=True, exist_ok=True)
         self._load_index()
+        self._load_failure_index()
 
     @staticmethod
     def _key_for_url(url: str) -> str:
@@ -1184,6 +1188,15 @@ class ResultCache:
         except Exception:
             self._index = {}
 
+    def _load_failure_index(self) -> None:
+        try:
+            data = json.loads(self._failure_index_file.read_text(encoding='utf-8'))
+            entries = data.get('entries', {}) if isinstance(data, dict) else {}
+            if isinstance(entries, dict):
+                self._failure_index = entries
+        except Exception:
+            self._failure_index = {}
+
     def _save_index_locked(self) -> None:
         payload = {
             'version': 1,
@@ -1192,12 +1205,24 @@ class ResultCache:
         }
         self._write_json_atomic(self._index_file, payload)
 
+    def _save_failure_index_locked(self) -> None:
+        payload = {
+            'version': 1,
+            'updated_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'entries': self._failure_index,
+        }
+        self._write_json_atomic(self._failure_index_file, payload)
+
     def _delete_entry_locked(self, key: str) -> None:
         self._index.pop(key, None)
         try:
             self._entry_file(key).unlink(missing_ok=True)
         except Exception:
             pass
+
+    @staticmethod
+    def _failure_key(url: str, task: str) -> str:
+        return hashlib.sha256(f'{task}\0{url}'.encode('utf-8')).hexdigest()
 
     def _evict_locked(self) -> None:
         total_size = sum(int(meta.get('size_bytes', 0) or 0) for meta in self._index.values())
@@ -1251,10 +1276,11 @@ class ResultCache:
             return result
 
     def put(self, url: str, result: Dict) -> None:
-        # Cache only successful audio transcripts.
-        if result.get('status') != 'ok' or result.get('task') != 'audio':
+        # Cache successful results by URL for both audio transcripts and image OCR.
+        if result.get('status') != 'ok' or result.get('task') not in {'audio', 'image'}:
             return
         key = self._key_for_url(url)
+        failure_key = self._failure_key(url, str(result.get('task') or ''))
         now_ts, now_iso = self._now()
         with self._lock:
             prev = self._index.get(key, {})
@@ -1293,8 +1319,48 @@ class ResultCache:
                 'last_access_at': now_iso,
                 'last_access_ts': now_ts,
             }
+            if failure_key in self._failure_index:
+                self._failure_index.pop(failure_key, None)
             self._evict_locked()
             self._save_index_locked()
+            self._save_failure_index_locked()
+
+    def get_failure_count(self, url: str, task: str = 'image') -> int:
+        key = self._failure_key(url, task)
+        with self._lock:
+            meta = self._failure_index.get(key)
+            if not isinstance(meta, dict):
+                return 0
+            try:
+                return max(0, int(meta.get('count') or 0))
+            except Exception:
+                return 0
+
+    def record_failure(self, url: str, task: str = 'image') -> int:
+        key = self._failure_key(url, task)
+        now_ts, now_iso = self._now()
+        with self._lock:
+            meta = self._failure_index.get(key, {})
+            try:
+                count = max(0, int(meta.get('count') or 0)) + 1
+            except Exception:
+                count = 1
+            self._failure_index[key] = {
+                'url': url,
+                'task': task,
+                'count': count,
+                'last_failure_at': now_iso,
+                'last_failure_ts': now_ts,
+            }
+            self._save_failure_index_locked()
+            return count
+
+    def clear_failures(self, url: str, task: str = 'image') -> None:
+        key = self._failure_key(url, task)
+        with self._lock:
+            if key in self._failure_index:
+                self._failure_index.pop(key, None)
+                self._save_failure_index_locked()
 
 
 def wrap_result_payload(result: Dict) -> Dict:
@@ -1349,7 +1415,7 @@ def transcribe_url(url: str,
                    ai_timeout: int,
                    ai_api_key: str | None,
                    result_cache: ResultCache | None = None) -> Dict:
-    if result_cache is not None and task != 'image':
+    if result_cache is not None:
         cached = result_cache.get(url)
         if cached is not None:
             cache_result = dict(cached)
@@ -1365,19 +1431,58 @@ def transcribe_url(url: str,
         resolved_task = detect_task(url, content_type, task, tmp_path)
 
         if resolved_task == 'image':
-            text, used_provider, image_meta = extract_text_from_image(
-                tmp_path,
-                url,
-                image_ocr_provider,
-                ai_model,
-                ai_endpoint,
-                ai_timeout,
-                ai_api_key,
-                tencent_secret_id,
-                tencent_secret_key,
-                tencent_region,
-                tencent_account_pool,
-            )
+            if result_cache is not None:
+                failure_count = result_cache.get_failure_count(url, 'image')
+                if failure_count >= DEFAULT_OCR_FAILURE_THRESHOLD:
+                    return {
+                        'url': url,
+                        'status': 'ok',
+                        'task': 'image',
+                        'text': '未知',
+                        'language': language,
+                        'duration': None,
+                        'engine': 'ocr-failure-fallback',
+                        'model': 'image-ocr',
+                        'model_path': None,
+                        'transcription_source': str(tmp_path),
+                        'cache_hit': False,
+                        'ocr_failure_count': failure_count,
+                    }
+            try:
+                text, used_provider, image_meta = extract_text_from_image(
+                    tmp_path,
+                    url,
+                    image_ocr_provider,
+                    ai_model,
+                    ai_endpoint,
+                    ai_timeout,
+                    ai_api_key,
+                    tencent_secret_id,
+                    tencent_secret_key,
+                    tencent_region,
+                    tencent_account_pool,
+                )
+            except Exception:
+                failure_count = 0
+                if result_cache is not None:
+                    try:
+                        failure_count = result_cache.record_failure(url, 'image')
+                    except Exception:
+                        failure_count = 0
+                return {
+                    'url': url,
+                    'status': 'ok',
+                    'task': 'image',
+                    'text': '未知',
+                    'language': language,
+                    'duration': None,
+                    'engine': 'ocr-failure-fallback',
+                    'model': 'image-ocr',
+                    'model_path': None,
+                    'transcription_source': str(tmp_path),
+                    'cache_hit': False,
+                    'ocr_failure_count': failure_count or None,
+                }
             result = {
                 'url': url,
                 'status': 'ok',
@@ -1392,6 +1497,11 @@ def transcribe_url(url: str,
                 'cache_hit': False,
             }
             result.update(image_meta)
+            if result_cache is not None:
+                try:
+                    result_cache.put(url, result)
+                except Exception:
+                    pass
             return result
 
         if asr_provider == 'tencent':
@@ -1439,6 +1549,11 @@ def transcribe_url(url: str,
                         int(selected_account.get('_selection_remaining_quota_seconds') or 0)
                     )
             result['cache_hit'] = False
+            if result_cache is not None:
+                try:
+                    result_cache.clear_failures(url, 'image')
+                except Exception:
+                    pass
             return result
 
         model, model_path = model_pool.get(model_name, device, compute_type)
@@ -1494,6 +1609,27 @@ def transcribe_url(url: str,
         result['cache_hit'] = False
         return result
     except Exception as err:  # pragma: no cover - entrypoint handling
+        if locals().get('resolved_task') == 'image':
+            failure_count = 0
+            if result_cache is not None:
+                try:
+                    failure_count = result_cache.record_failure(url, 'image')
+                except Exception:
+                    failure_count = 0
+            return {
+                'url': url,
+                'status': 'ok',
+                'task': 'image',
+                'text': '未知',
+                'language': language,
+                'duration': None,
+                'engine': 'ocr-failure-fallback',
+                'model': 'image-ocr',
+                'model_path': None,
+                'transcription_source': str(locals().get('tmp_path', '')),
+                'cache_hit': False,
+                'ocr_failure_count': failure_count or None,
+            }
         return {
             'url': url,
             'status': 'error',
