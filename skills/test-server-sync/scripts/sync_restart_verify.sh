@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST="202.140.140.117"
-USER_NAME="root"
-PASSWORD='Zhangzhi@888'
-REMOTE_DIR="/data/to_text"
-BRANCH="main"
-AUDIO_URL="https://df.qi.work/fs/file/phone/2067/2026/04/44da98e4-6963-4999-b112-14496f336c48.mp3"
+HOST="${TEST_SERVER_HOST:-202.140.140.117}"
+USER_NAME="${TEST_SERVER_USER:-root}"
+PASSWORD="${TEST_SERVER_PASSWORD:-}"
+REMOTE_DIR="${TEST_SERVER_REMOTE_DIR:-/data/to_text}"
+BRANCH="${TEST_SERVER_BRANCH:-main}"
+AUDIO_URL="${TEST_SERVER_AUDIO_URL:-https://df.qi.work/fs/file/phone/2067/2026/04/44da98e4-6963-4999-b112-14496f336c48.mp3}"
+
+if [[ -z "${PASSWORD}" ]]; then
+  echo "Missing required env var: TEST_SERVER_PASSWORD" >&2
+  echo "Set TEST_SERVER_PASSWORD before running this sync script." >&2
+  exit 2
+fi
 
 SYNC_ONLY=0
 VERIFY_ONLY=0
@@ -24,10 +30,10 @@ fi
 
 remote_sync_cmd=$(cat <<'CMD'
 set -e
-cd /data/to_text
+cd "__REMOTE_DIR__"
 git fetch origin
-git checkout main
-git pull --ff-only origin main
+git checkout "__BRANCH__"
+git pull --ff-only origin "__BRANCH__"
 if [[ ! -f transcribe_config.json && -f transcribe_config.template.json ]]; then
   cp transcribe_config.template.json transcribe_config.json
 fi
@@ -58,24 +64,28 @@ echo
 printf 'REMOTE_HEAD=%s\n' "$(git rev-parse --short HEAD)"
 CMD
 )
+remote_sync_cmd=${remote_sync_cmd//__REMOTE_DIR__/${REMOTE_DIR}}
+remote_sync_cmd=${remote_sync_cmd//__BRANCH__/${BRANCH}}
 
 remote_verify_cmd=$(cat <<'CMD'
 set -e
-cd /data/to_text
+cd "__REMOTE_DIR__"
 curl -fsS http://127.0.0.1:8014/health
 curl -fsS -X POST 'http://127.0.0.1:8014/transcribe' \
   -H 'Content-Type: application/json' \
   -d '{
-    "url": "https://df.qi.work/fs/file/phone/2067/2026/04/44da98e4-6963-4999-b112-14496f336c48.mp3",
+    "url": "__AUDIO_URL__",
     "raw": true
   }'
 CMD
 )
+remote_verify_cmd=${remote_verify_cmd//__REMOTE_DIR__/${REMOTE_DIR}}
+remote_verify_cmd=${remote_verify_cmd//__AUDIO_URL__/${AUDIO_URL}}
 
 run_remote() {
   local cmd="$1"
   if command -v sshpass >/dev/null 2>&1; then
-    sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${USER_NAME}@${HOST}" "$cmd"
+    SSHPASS="$PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${USER_NAME}@${HOST}" "$cmd"
   else
     echo "sshpass not found. Run manually:" >&2
     echo "ssh ${USER_NAME}@${HOST}" >&2
