@@ -2132,6 +2132,13 @@ def serve_command(args: argparse.Namespace) -> int:
         }
 
         def _json_resp(self, payload: Dict, status: int = 200) -> None:
+            if isinstance(payload, dict) and 'success' not in payload:
+                normalized = dict(payload)
+                if 'status' in normalized:
+                    normalized['success'] = str(normalized.get('status') or '').lower() == 'ok'
+                else:
+                    normalized['success'] = 200 <= int(status) < 400
+                payload = normalized
             data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
             self.send_response(status)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
