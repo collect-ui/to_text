@@ -2256,11 +2256,27 @@ def serve_command(args: argparse.Namespace) -> int:
                 return
             params = parse_qs(parsed.query or '')
             status = (params.get('status') or ['all'])[0]
+            account_name = ((params.get('account_name') or [''])[0] or '').strip().lower()
+            match_mode = ((params.get('match_mode') or ['contains'])[0] or 'contains').strip().lower()
             allowed_status = {'all', REQUEST_STATUS_PENDING, REQUEST_STATUS_APPROVED, REQUEST_STATUS_REJECTED, REQUEST_STATUS_UNDONE}
             if status not in allowed_status:
                 self._error(400, 'Invalid status filter')
                 return
+            if match_mode not in {'contains', 'exact'}:
+                self._error(400, 'Invalid match_mode')
+                return
             records = self.server_ctx['request_store'].list_requests(status)
+            if account_name:
+                if match_mode == 'exact':
+                    records = [
+                        item for item in records
+                        if account_name == str(item.get('account_name') or '').strip().lower()
+                    ]
+                else:
+                    records = [
+                        item for item in records
+                        if account_name in str(item.get('account_name') or '').strip().lower()
+                    ]
             self._json_resp({'status': 'ok', 'requests': _mark_undo_capability(records)})
 
         def _handle_direct_validate(self, payload: dict) -> None:

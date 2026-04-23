@@ -136,6 +136,7 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 腾讯账号审批流：
 - 申请页 `/apply` 公开提交名称和腾讯密钥，不直接修改运行配置
 - 审核页 `/review` 用 `X-Admin-Token` 调管理接口，支持验证、通过、拒绝和撤销
+- 申请列表接口支持 `account_name` + `match_mode(contains|exact)`，可按账号做包含或精确搜索（不区分大小写）
 - 审核通过后会把账号追加到 `asr.tencent.accounts`，并立即热加载生效
 - 撤销仅允许最近一次已生效审批，回滚到该次审批前的配置快照
 

@@ -281,6 +281,21 @@
               <option value="undone">已撤销</option>
             </select>
           </div>
+          <div>
+            <label for="accountNameFilter">申请账号搜索</label>
+            <input id="accountNameFilter" placeholder="按 account_name 关键字过滤">
+          </div>
+          <div>
+            <label for="accountNameMatchMode">匹配模式</label>
+            <select id="accountNameMatchMode">
+              <option value="contains">关键字包含</option>
+              <option value="exact">精确匹配</option>
+            </select>
+          </div>
+          <div class="btn-row">
+            <button id="searchBtn" class="ghost" type="button">搜索账号</button>
+            <button id="clearSearchBtn" class="ghost" type="button">清空搜索</button>
+          </div>
           <div class="btn-row">
             <button id="refreshBtn" class="primary" type="button">刷新列表</button>
             <button id="saveTokenBtn" class="ghost" type="button">记住口令</button>
@@ -321,6 +336,10 @@
   <script>
     const adminTokenEl = document.getElementById('adminToken');
     const statusFilterEl = document.getElementById('statusFilter');
+    const accountNameFilterEl = document.getElementById('accountNameFilter');
+    const accountNameMatchModeEl = document.getElementById('accountNameMatchMode');
+    const searchBtn = document.getElementById('searchBtn');
+    const clearSearchBtn = document.getElementById('clearSearchBtn');
     const refreshBtn = document.getElementById('refreshBtn');
     const saveTokenBtn = document.getElementById('saveTokenBtn');
     const directValidateBtn = document.getElementById('directValidateBtn');
@@ -419,7 +438,15 @@
       refreshBtn.disabled = true;
       setStatus(globalStatusEl, '正在加载申请列表...', '');
       try {
-        const response = await fetch(`/tencent/account-requests?status=${encodeURIComponent(statusFilterEl.value)}`, {
+        const params = new URLSearchParams({
+          status: statusFilterEl.value,
+        });
+        const accountNameFilter = accountNameFilterEl.value.trim();
+        if (accountNameFilter) {
+          params.set('account_name', accountNameFilter);
+          params.set('match_mode', accountNameMatchModeEl.value);
+        }
+        const response = await fetch(`/tencent/account-requests?${params.toString()}`, {
           headers: adminHeaders(),
         });
         const data = await response.json();
@@ -427,7 +454,10 @@
           throw new Error(data.error || `HTTP ${response.status}`);
         }
         renderRequests(data.requests || []);
-        setStatus(globalStatusEl, `已加载 ${statusFilterEl.value} 列表，共 ${(data.requests || []).length} 条。`, 'ok');
+        const keywordTip = accountNameFilter
+          ? `，账号关键字：${accountNameFilter}（${accountNameMatchModeEl.value === 'exact' ? '精确匹配' : '包含匹配'}）`
+          : '';
+        setStatus(globalStatusEl, `已加载 ${statusFilterEl.value} 列表${keywordTip}，共 ${(data.requests || []).length} 条。`, 'ok');
       } catch (error) {
         requestListEl.innerHTML = '';
         setStatus(globalStatusEl, `加载失败：${error.message}`, 'err');
@@ -507,11 +537,23 @@
     });
 
     refreshBtn.addEventListener('click', loadRequests);
+    searchBtn.addEventListener('click', loadRequests);
+    clearSearchBtn.addEventListener('click', () => {
+      accountNameFilterEl.value = '';
+      accountNameMatchModeEl.value = 'contains';
+      loadRequests();
+    });
     saveTokenBtn.addEventListener('click', () => {
       localStorage.setItem('to_text_admin_token', adminTokenEl.value.trim());
       setStatus(globalStatusEl, '管理口令已保存在当前浏览器。', 'ok');
     });
     statusFilterEl.addEventListener('change', loadRequests);
+    accountNameMatchModeEl.addEventListener('change', loadRequests);
+    accountNameFilterEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        loadRequests();
+      }
+    });
 
     loadRequests();
   </script>

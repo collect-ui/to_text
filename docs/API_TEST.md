@@ -180,6 +180,14 @@ curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests' \
 ```bash
 curl -s 'http://127.0.0.1:8014/tencent/account-requests?status=pending' \
   -H 'X-Admin-Token: change-this-token'
+
+# 按申请账号关键字搜索
+curl -s 'http://127.0.0.1:8014/tencent/account-requests?status=all&account_name=marketing' \
+  -H 'X-Admin-Token: change-this-token'
+
+# 按申请账号精确匹配
+curl -s 'http://127.0.0.1:8014/tencent/account-requests?status=all&account_name=marketing&match_mode=exact' \
+  -H 'X-Admin-Token: change-this-token'
 ```
 
 验证某个申请里的密钥（管理员）：
@@ -225,6 +233,9 @@ curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests/req_xxxxx/undo' 
 
 说明：
 - 申请接口公开，审核/验证/撤销接口都要求 `X-Admin-Token`
+- 申请列表支持 `account_name` + `match_mode` 查询参数：
+- `match_mode=contains`：关键字包含匹配（默认）
+- `match_mode=exact`：申请账号精确匹配
 - 审核通过后会写入 `transcribe_config.json` 并热加载，无需重启
 - 拒绝不会改配置
 - 撤销仅支持最近一次已生效审批，回滚到审批前配置快照
