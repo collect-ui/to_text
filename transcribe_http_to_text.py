@@ -2152,7 +2152,7 @@ def serve_command(args: argparse.Namespace) -> int:
                     normalized['success'] = 200 <= int(status) < 400
                 payload = normalized
             data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-            self.send_response(status)
+            self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
@@ -2268,7 +2268,7 @@ def serve_command(args: argparse.Namespace) -> int:
                 'config_snapshot_before': None,
                 'config_snapshot_after': None,
             })
-            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(record)}, 201)
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(record)})
 
         def _handle_list_requests(self, parsed) -> None:
             if not self._require_admin():
@@ -2545,7 +2545,7 @@ def serve_command(args: argparse.Namespace) -> int:
             )
             req['duration_ms'] = int(req.get('duration', 0) * 1000) if req.get('duration') else 0
             if payload.get('raw') is True:
-                self._json_resp(req, 200 if req.get('status') == 'ok' else 500)
+                self._json_resp(req)
             else:
                 wrapped = wrap_result_payload(req)
                 self._json_resp(wrapped, 200)
