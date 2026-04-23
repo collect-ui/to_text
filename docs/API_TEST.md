@@ -25,6 +25,10 @@ curl -s 'http://127.0.0.1:8014/tencent/quota?start_date=2026-04-01&end_date=2026
 - 返回主结构仍是 ASR 用量
 - 同时会额外带 `ocr_usage` 字段，里面是腾讯 OCR 控制台官方调用统计
 
+腾讯账号申请页 / 审核页：
+- 申请页：`GET /apply`
+- 审核页：`GET /review`
+
 ## 2. 音频转写 `/transcribe`
 
 请求：
@@ -153,7 +157,80 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
 - `--cache-max-size-mb`：最大缓存体积（默认 `200` MB）
 - `--no-result-cache`：禁用缓存
 
-## 5. 一键冒烟测试脚本
+## 5. 腾讯账号申请与审核
+
+申请新账号：
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "applicant_name": "市场组-张三",
+    "account_name": "ocr-marketing-prod",
+    "secret_id": "AKIDxxxxx",
+    "secret_key": "xxxxx",
+    "region": "ap-beijing",
+    "monthly_quota_seconds": 36000,
+    "remark": "每月免费 10 小时测试号"
+  }'
+```
+
+查询申请列表（管理员）：
+
+```bash
+curl -s 'http://127.0.0.1:8014/tencent/account-requests?status=pending' \
+  -H 'X-Admin-Token: change-this-token'
+```
+
+验证某个申请里的密钥（管理员）：
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests/req_xxxxx/validate' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-token' \
+  -d '{}'
+```
+
+直接验证密钥，不依赖申请单（管理员）：
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/tencent/account-credentials/validate' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-token' \
+  -d '{
+    "secret_id": "AKIDxxxxx",
+    "secret_key": "xxxxx",
+    "region": "ap-beijing"
+  }'
+```
+
+审核通过 / 拒绝 / 撤销（管理员）：
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests/req_xxxxx/approve' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-token' \
+  -d '{"review_comment":"验证通过，准入"}'
+
+curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests/req_xxxxx/reject' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-token' \
+  -d '{"review_comment":"额度用途不明确"}'
+
+curl -s -X POST 'http://127.0.0.1:8014/tencent/account-requests/req_xxxxx/undo' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: change-this-token' \
+  -d '{}'
+```
+
+说明：
+- 申请接口公开，审核/验证/撤销接口都要求 `X-Admin-Token`
+- 审核通过后会写入 `transcribe_config.json` 并热加载，无需重启
+- 拒绝不会改配置
+- 撤销仅支持最近一次已生效审批，回滚到审批前配置快照
+- 列表接口只返回脱敏后的 `secret_id_masked` / `secret_key_masked`
+
+## 6. 一键冒烟测试脚本
 
 ```bash
 cd /data/project/to_text

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tencent Key 审核台</title>
+  <style>
+    :root {
+      --bg: #f3f7f1;
+      --panel: rgba(249, 252, 246, 0.92);
+      --ink: #14213d;
+      --muted: #5f6b76;
+      --line: rgba(20, 33, 61, 0.12);
+      --accent: #0f766e;
+      --accent-strong: #155e75;
+      --warn: #b45309;
+      --danger: #b91c1c;
+      --ok: #166534;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "Noto Sans SC", "PingFang SC", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(14, 165, 233, 0.14), transparent 28%),
+        radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.16), transparent 32%),
+        linear-gradient(145deg, #eef7ef, #edf4fb);
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 28px));
+      margin: 24px auto 36px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero, .panel, .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
+      backdrop-filter: blur(16px);
+    }
+
+    .hero, .panel {
+      padding: 24px;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      font-weight: 800;
+    }
+
+    h1, h2, h3, p { margin: 0; }
+
+    h1 {
+      margin-top: 10px;
+      font-size: clamp(32px, 5vw, 56px);
+      line-height: 1.02;
+    }
+
+    .sub {
+      margin-top: 10px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid rgba(20, 33, 61, 0.14);
+      border-radius: 16px;
+      padding: 14px 16px;
+      font: inherit;
+      background: rgba(255,255,255,0.92);
+      color: var(--ink);
+    }
+
+    textarea {
+      min-height: 96px;
+      resize: vertical;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button, .link-btn {
+      border: 0;
+      border-radius: 999px;
+      min-height: 42px;
+      padding: 0 16px;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    button.primary {
+      color: #fff;
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+    }
+
+    button.ghost, .link-btn {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.68);
+      color: var(--ink);
+    }
+
+    button.warn {
+      color: #fff;
+      background: linear-gradient(135deg, #d97706, var(--warn));
+    }
+
+    button.danger {
+      color: #fff;
+      background: linear-gradient(135deg, #dc2626, var(--danger));
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+
+    .status {
+      margin-top: 14px;
+      border-radius: 16px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+      color: var(--muted);
+      line-height: 1.7;
+      white-space: pre-wrap;
+    }
+
+    .status.ok { color: var(--ok); border-color: rgba(22, 101, 52, 0.18); }
+    .status.err { color: var(--danger); border-color: rgba(185, 28, 28, 0.18); }
+
+    .list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .card {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .card-title {
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 92px;
+      min-height: 34px;
+      border-radius: 999px;
+      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 800;
+      background: rgba(15, 118, 110, 0.12);
+      color: var(--accent);
+    }
+
+    .pill.pending { background: rgba(217, 119, 6, 0.14); color: var(--warn); }
+    .pill.approved { background: rgba(22, 101, 52, 0.14); color: var(--ok); }
+    .pill.rejected, .pill.undone { background: rgba(185, 28, 28, 0.14); color: var(--danger); }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 16px;
+      font-size: 14px;
+    }
+
+    .meta strong {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--line);
+    }
+
+    code {
+      background: rgba(15, 23, 42, 0.06);
+      border-radius: 8px;
+      padding: 2px 6px;
+    }
+
+    @media (max-width: 920px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(100vw - 16px, 1180px); }
+      .hero, .panel { padding: 18px; border-radius: 20px; }
+      .meta { grid-template-columns: 1fr; }
+      .card-head { flex-direction: column; }
+      .actions, .btn-row { flex-direction: column; }
+      button, .link-btn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">Tencent Review Console</div>
+      <h1>审核、验证、撤销，在一个面板里完成。</h1>
+      <p class="sub">审核台通过 <code>X-Admin-Token</code> 访问管理接口。申请页提交进来的密钥不会直接生效，只有审核通过后才会写入账号池；已生效记录仍然支持撤销。</p>
+      <div class="btn-row" style="margin-top:16px;">
+        <a class="link-btn" href="/">返回首页</a>
+        <a class="link-btn" href="/apply">打开申请页</a>
+      </div>
+    </section>
+
+    <section class="grid">
+      <aside class="panel">
+        <div class="controls">
+          <div>
+            <label for="adminToken">管理口令</label>
+            <input id="adminToken" type="password" placeholder="输入 ADMIN_TOKEN">
+          </div>
+          <div>
+            <label for="statusFilter">状态筛选</label>
+            <select id="statusFilter">
+              <option value="all">全部</option>
+              <option value="pending">待审核</option>
+              <option value="approved">已通过</option>
+              <option value="rejected">已拒绝</option>
+              <option value="undone">已撤销</option>
+            </select>
+          </div>
+          <div class="btn-row">
+            <button id="refreshBtn" class="primary" type="button">刷新列表</button>
+            <button id="saveTokenBtn" class="ghost" type="button">记住口令</button>
+          </div>
+        </div>
+        <div id="globalStatus" class="status">等待加载。</div>
+
+        <div class="divider" style="margin:18px 0;"></div>
+
+        <h2>单独验证密钥</h2>
+        <p class="sub">这个接口可被其他页面复用，不依赖申请单。</p>
+        <div class="controls" style="margin-top:14px;">
+          <div>
+            <label for="directSecretId">SecretId</label>
+            <input id="directSecretId" placeholder="AKID...">
+          </div>
+          <div>
+            <label for="directSecretKey">SecretKey</label>
+            <input id="directSecretKey" type="password" placeholder="SecretKey">
+          </div>
+          <div>
+            <label for="directRegion">Region</label>
+            <input id="directRegion" value="ap-beijing">
+          </div>
+          <button id="directValidateBtn" class="warn" type="button">验证密钥</button>
+          <div id="directStatus" class="status">等待验证。</div>
+        </div>
+      </aside>
+
+      <section class="panel">
+        <h2>申请列表</h2>
+        <p class="sub">列表只显示脱敏后的 SecretId / SecretKey。审批前建议先做一次验证，审批后会立即写入 <code>transcribe_config.json</code> 并热加载。</p>
+        <div id="requestList" class="list" style="margin-top:18px;"></div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const adminTokenEl = document.getElementById('adminToken');
+    const statusFilterEl = document.getElementById('statusFilter');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const saveTokenBtn = document.getElementById('saveTokenBtn');
+    const directValidateBtn = document.getElementById('directValidateBtn');
+    const requestListEl = document.getElementById('requestList');
+    const globalStatusEl = document.getElementById('globalStatus');
+    const directStatusEl = document.getElementById('directStatus');
+
+    adminTokenEl.value = localStorage.getItem('to_text_admin_token') || '';
+
+    function adminHeaders() {
+      return {
+        'Content-Type': 'application/json',
+        'X-Admin-Token': adminTokenEl.value.trim(),
+      };
+    }
+
+    function setStatus(el, message, type) {
+      el.textContent = message;
+      el.className = `status ${type || ''}`.trim();
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    function statusClass(status) {
+      return ['pending', 'approved', 'rejected', 'undone'].includes(status) ? status : '';
+    }
+
+    function actionButton(label, className, action, requestId, disabled) {
+      return `<button class="${className}" data-action="${action}" data-request-id="${requestId}" ${disabled ? 'disabled' : ''}>${label}</button>`;
+    }
+
+    function validationText(validationResult) {
+      const result = validationResult || {};
+      const status = result.status || 'unverified';
+      if (status === 'ok') {
+        return `验证成功 · ${result.validated_at || '-'} · ${result.usage_region || '-'}`;
+      }
+      if (status === 'error') {
+        return `验证失败 · ${result.error || '-'} · ${result.validated_at || '-'}`;
+      }
+      return '尚未验证';
+    }
+
+    function renderRequests(items) {
+      if (!items.length) {
+        requestListEl.innerHTML = '<div class="status">当前筛选下没有记录。</div>';
+        return;
+      }
+      requestListEl.innerHTML = items.map((item) => {
+        const disabled = !adminTokenEl.value.trim();
+        const actions = [
+          actionButton('验证', 'ghost', 'validate', item.id, item.status !== 'pending' || disabled),
+          actionButton('通过', 'primary', 'approve', item.id, item.status !== 'pending' || disabled),
+          actionButton('拒绝', 'warn', 'reject', item.id, item.status !== 'pending' || disabled),
+          actionButton('撤销', 'danger', 'undo', item.id, !item.can_undo || disabled),
+        ].join('');
+        return `
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">${escapeHtml(item.account_name)}</div>
+                <div class="sub">申请单号：${escapeHtml(item.id)} · 申请人：${escapeHtml(item.applicant_name)}</div>
+              </div>
+              <span class="pill ${statusClass(item.status)}">${escapeHtml(item.status)}</span>
+            </div>
+            <div class="meta">
+              <div><strong>SecretId</strong>${escapeHtml(item.secret_id_masked)}</div>
+              <div><strong>SecretKey</strong>${escapeHtml(item.secret_key_masked)}</div>
+              <div><strong>Region</strong>${escapeHtml(item.region)}</div>
+              <div><strong>月额度秒数</strong>${escapeHtml(item.monthly_quota_seconds)}</div>
+              <div><strong>创建时间</strong>${escapeHtml(item.created_at || '-')}</div>
+              <div><strong>审核时间</strong>${escapeHtml(item.reviewed_at || '-')}</div>
+              <div><strong>备注</strong>${escapeHtml(item.remark || '-')}</div>
+              <div><strong>审核说明</strong>${escapeHtml(item.review_comment || '-')}</div>
+              <div><strong>验证结果</strong>${escapeHtml(validationText(item.validation_result))}</div>
+              <div><strong>撤销时间</strong>${escapeHtml(item.undone_at || '-')}</div>
+            </div>
+            <div class="actions">${actions}</div>
+          </article>
+        `;
+      }).join('');
+    }
+
+    async function loadRequests() {
+      if (!adminTokenEl.value.trim()) {
+        setStatus(globalStatusEl, '先输入管理口令，再刷新列表。', '');
+        requestListEl.innerHTML = '<div class="status">等待管理口令。</div>';
+        return;
+      }
+      refreshBtn.disabled = true;
+      setStatus(globalStatusEl, '正在加载申请列表...', '');
+      try {
+        const response = await fetch(`/tencent/account-requests?status=${encodeURIComponent(statusFilterEl.value)}`, {
+          headers: adminHeaders(),
+        });
+        const data = await response.json();
+        if (!response.ok || data.status !== 'ok') {
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+        renderRequests(data.requests || []);
+        setStatus(globalStatusEl, `已加载 ${statusFilterEl.value} 列表，共 ${(data.requests || []).length} 条。`, 'ok');
+      } catch (error) {
+        requestListEl.innerHTML = '';
+        setStatus(globalStatusEl, `加载失败：${error.message}`, 'err');
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    }
+
+    async function callRequestAction(requestId, action, payload) {
+      const response = await fetch(`/tencent/account-requests/${encodeURIComponent(requestId)}/${action}`, {
+        method: 'POST',
+        headers: adminHeaders(),
+        body: JSON.stringify(payload || {}),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }
+
+    requestListEl.addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) {
+        return;
+      }
+      const requestId = button.dataset.requestId;
+      const action = button.dataset.action;
+      const reviewComment = (action === 'approve' || action === 'reject')
+        ? window.prompt(action === 'approve' ? '审核通过备注（可为空）' : '拒绝原因（建议填写）', '')
+        : '';
+      if ((action === 'approve' || action === 'reject') && reviewComment === null) {
+        return;
+      }
+      button.disabled = true;
+      setStatus(globalStatusEl, `正在执行 ${action}...`, '');
+      try {
+        const payload = (action === 'approve' || action === 'reject')
+          ? { review_comment: reviewComment || '' }
+          : {};
+        await callRequestAction(requestId, action, payload);
+        setStatus(globalStatusEl, `${requestId} 已执行 ${action}。`, 'ok');
+        await loadRequests();
+      } catch (error) {
+        setStatus(globalStatusEl, `操作失败：${error.message}`, 'err');
+        button.disabled = false;
+      }
+    });
+
+    directValidateBtn.addEventListener('click', async () => {
+      directValidateBtn.disabled = true;
+      setStatus(directStatusEl, '正在验证密钥...', '');
+      try {
+        const response = await fetch('/tencent/account-credentials/validate', {
+          method: 'POST',
+          headers: adminHeaders(),
+          body: JSON.stringify({
+            secret_id: document.getElementById('directSecretId').value.trim(),
+            secret_key: document.getElementById('directSecretKey').value.trim(),
+            region: document.getElementById('directRegion').value.trim() || 'ap-beijing',
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+        setStatus(
+          directStatusEl,
+          `验证成功\nSecretId：${data.secret_id_masked || '-'}\n使用 Region：${data.usage_region || '-'}\n时间：${data.validated_at || '-'}`,
+          'ok',
+        );
+      } catch (error) {
+        setStatus(directStatusEl, `验证失败：${error.message}`, 'err');
+      } finally {
+        directValidateBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', loadRequests);
+    saveTokenBtn.addEventListener('click', () => {
+      localStorage.setItem('to_text_admin_token', adminTokenEl.value.trim());
+      setStatus(globalStatusEl, '管理口令已保存在当前浏览器。', 'ok');
+    });
+    statusFilterEl.addEventListener('change', loadRequests);
+
+    loadRequests();
+  </script>
+</body>
+</html>

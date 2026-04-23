@@ -4,7 +4,8 @@
 - 音频转写（`Tencent Cloud ASR`，默认）
 - 音频转写（`faster-whisper`，可切换）
 - 图片 OCR（`Tencent Cloud OCR`，默认；可切换 `PaddleOCR` / `pytesseract` / AI 视觉模型）
-- HTTP API（`/health`、`/transcribe`、`/tencent/quota`；`/ocr` 仅兼容保留）
+- HTTP API（`/health`、`/transcribe`、`/tencent/quota`、`/tencent/account-requests`；`/ocr` 仅兼容保留）
+- 腾讯账号申请页与审核页（`/apply`、`/review`）
 
 ## 1. 项目结构
 
@@ -34,10 +35,12 @@
 
 - 接口：`CreateRecTask` + `DescribeTaskStatus`（异步轮询）
 - 运行时配置文件：`./transcribe_config.json`（已忽略，不提交）
+- 审批申请存储：`./tencent_account_requests.json`（已忽略，不提交）
 - 配置模板：`./transcribe_config.template.json`
 - 默认模式字段：`asr.default_provider`（当前默认 `tencent`）
 - 凭证字段：`asr.tencent.secret_id`、`asr.tencent.secret_key`
 - 多账号字段：`asr.tencent.accounts`
+- 审核管理口令：环境变量 `ADMIN_TOKEN` 或启动参数 `--admin-token`
 - 当前默认识别参数：`engine_model_type=16k_zh`、`res_text_format=3`
 
 下载方式：
@@ -109,6 +112,15 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 
 - `GET /health`
 - `GET /tencent/quota`
+- `GET /apply`
+- `GET /review`
+- `GET /tencent/account-requests`（管理员）
+- `POST /tencent/account-credentials/validate`（管理员）
+- `POST /tencent/account-requests`
+- `POST /tencent/account-requests/{id}/validate`（管理员）
+- `POST /tencent/account-requests/{id}/approve`（管理员）
+- `POST /tencent/account-requests/{id}/reject`（管理员）
+- `POST /tencent/account-requests/{id}/undo`（管理员）
 - `POST /transcribe`
 
 图片与音频统一走 `POST /transcribe`：
@@ -120,6 +132,12 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 `GET /tencent/quota` 当前会同时返回：
 - ASR 用量汇总（`asr_rec` 等）
 - OCR 官方控制台调用统计（字段 `ocr_usage`，来自 `QueryCallForConsole`）
+
+腾讯账号审批流：
+- 申请页 `/apply` 公开提交名称和腾讯密钥，不直接修改运行配置
+- 审核页 `/review` 用 `X-Admin-Token` 调管理接口，支持验证、通过、拒绝和撤销
+- 审核通过后会把账号追加到 `asr.tencent.accounts`，并立即热加载生效
+- 撤销仅允许最近一次已生效审批，回滚到该次审批前的配置快照
 
 ### 5.1 转写结果缓存（默认开启）
 
@@ -177,10 +195,18 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 cp transcribe_config.template.json transcribe_config.json
 ```
 
+如需启用审核页：
+
+```bash
+export ADMIN_TOKEN='change-this-token'
+./start_transcribe_service.sh
+```
+
 说明：
 - 配了 `accounts` 后，腾讯转写会按账号轮询
 - 如果单次请求显式传了 `tencent_secret_id` / `tencent_secret_key`，仍然优先走请求内密钥
 - `monthly_quota_seconds` 是本地配置额度，不是腾讯云接口直接返回字段
+- 待审核申请落在 `tencent_account_requests.json`，与运行配置文件分开保存
 
 默认走配置里的 `asr.default_provider`。单次请求可覆盖：
 

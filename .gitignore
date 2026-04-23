@@ -14,6 +14,7 @@ compare_report_*.md
 tencent_quality_compare_*.md
 transcript_*.txt
 transcribe_config.json
+tencent_account_requests.json
 test/
 
 # Model artifacts (large files, do not commit)

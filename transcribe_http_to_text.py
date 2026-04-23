@@ -4,6 +4,7 @@
 
 import argparse
 import base64
+import copy
 import datetime
 import hashlib
 import hmac
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,9 +57,12 @@ DEFAULT_AI_OCR_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
 DEFAULT_AI_OCR_MODEL = 'gpt-4o-mini'
 DEFAULT_CONFIG_FILE = SCRIPT_DIR / 'transcribe_config.json'
 DEFAULT_INDEX_FILE = SCRIPT_DIR / 'index.html'
+DEFAULT_APPLY_PAGE_FILE = SCRIPT_DIR / 'apply.html'
+DEFAULT_REVIEW_PAGE_FILE = SCRIPT_DIR / 'review.html'
 DEFAULT_RESULT_CACHE_DIR = SCRIPT_DIR / 'cache' / 'transcribe_result'
 DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
 DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
+DEFAULT_REQUEST_STORE_FILE = SCRIPT_DIR / 'tencent_account_requests.json'
 DEFAULT_OCR_FAILURE_THRESHOLD = 1
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
@@ -67,6 +72,40 @@ TENCENT_OCR_USAGE_TIME_GRANULARITY_DAY = 86400
 TENCENT_USAGE_REGION_FALLBACKS = ('ap-guangzhou', 'ap-shanghai', 'ap-beijing')
 TENCENT_USAGE_CACHE_TTL_SECONDS = 300
 TENCENT_SELECTION_RESERVATION_SECONDS = 180
+REQUEST_STATUS_PENDING = 'pending'
+REQUEST_STATUS_APPROVED = 'approved'
+REQUEST_STATUS_REJECTED = 'rejected'
+REQUEST_STATUS_UNDONE = 'undone'
+
+
+def _read_json_file(path: Path, default: dict) -> dict:
+    if not path.exists():
+        return copy.deepcopy(default)
+    try:
+        loaded = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(loaded, dict):
+            return loaded
+    except Exception:
+        pass
+    return copy.deepcopy(default)
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    tmp_path.replace(path)
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return default
 
 
 def _deep_update(dst: dict, src: dict) -> dict:
@@ -230,9 +269,101 @@ class TencentCredentialPool:
         return summary
 
 
+def _build_tencent_runtime(runtime_config: dict) -> dict:
+    runtime = runtime_config.setdefault('asr', {}).setdefault('tencent', {})
+    runtime['accounts'] = _normalize_tencent_accounts(runtime.get('accounts'), runtime)
+    return runtime
+
+
+def _sync_runtime_config_globals(runtime_config: dict) -> dict:
+    global RUNTIME_CONFIG
+    runtime = _build_tencent_runtime(runtime_config)
+    RUNTIME_CONFIG = runtime_config
+    return runtime
+
+
+def _refresh_server_tencent_defaults(server_ctx: dict, runtime_config: dict) -> None:
+    runtime = _sync_runtime_config_globals(runtime_config)
+    defaults = server_ctx['defaults']
+    defaults['asr_provider'] = str(runtime_config.get('asr', {}).get('default_provider') or defaults.get('asr_provider') or 'tencent')
+    defaults['tencent_secret_id'] = str(runtime.get('secret_id') or '')
+    defaults['tencent_secret_key'] = str(runtime.get('secret_key') or '')
+    defaults['tencent_region'] = str(runtime.get('region') or 'ap-beijing')
+    defaults['tencent_engine_model_type'] = str(runtime.get('engine_model_type') or '16k_zh')
+    defaults['tencent_channel_num'] = _safe_int(runtime.get('channel_num'), 1)
+    defaults['tencent_res_text_format'] = _safe_int(runtime.get('res_text_format'), 3)
+    defaults['tencent_quality_mode'] = str(runtime.get('quality_mode') or 'standard')
+    defaults['tencent_hotword_id'] = str(runtime.get('hotword_id') or '')
+    defaults['tencent_hotword_list'] = str(runtime.get('hotword_list') or '')
+    defaults['tencent_convert_num_mode'] = _safe_int(runtime.get('convert_num_mode'), 1)
+    defaults['tencent_filter_modal'] = _safe_int(runtime.get('filter_modal'), 1)
+    defaults['tencent_filter_punc'] = _safe_int(runtime.get('filter_punc'), 0)
+    defaults['tencent_filter_dirty'] = _safe_int(runtime.get('filter_dirty'), 0)
+    defaults['tencent_poll_interval'] = _safe_int(runtime.get('poll_interval_seconds'), 2)
+    defaults['tencent_poll_timeout'] = _safe_int(runtime.get('poll_timeout_seconds'), 600)
+    defaults['tencent_accounts'] = [dict(item) for item in runtime.get('accounts', [])]
+    server_ctx['tencent_account_pool'] = TencentCredentialPool(defaults['tencent_accounts'])
+
+
+class TencentAccountRequestStore:
+    def __init__(self, path: Path):
+        self._path = path
+        self._lock = threading.Lock()
+        self._default_payload = {'version': 1, 'requests': []}
+
+    def create_request(self, payload: dict) -> dict:
+        with self._lock:
+            data = self._load_locked()
+            record = copy.deepcopy(payload)
+            data['requests'].append(record)
+            self._write_locked(data)
+            return copy.deepcopy(record)
+
+    def get_request(self, request_id: str) -> dict | None:
+        with self._lock:
+            data = self._load_locked()
+            record = self._find_request_locked(data, request_id)
+            return copy.deepcopy(record) if record is not None else None
+
+    def list_requests(self, status: str = 'all') -> list[dict]:
+        with self._lock:
+            data = self._load_locked()
+            records = data.get('requests') or []
+            if status != 'all':
+                records = [item for item in records if str(item.get('status') or '') == status]
+            records = sorted(records, key=lambda item: str(item.get('created_at') or ''), reverse=True)
+            return copy.deepcopy(records)
+
+    def update_request(self, request_id: str, updater) -> dict:
+        with self._lock:
+            data = self._load_locked()
+            record = self._find_request_locked(data, request_id)
+            if record is None:
+                raise KeyError(request_id)
+            updater(record, data)
+            self._write_locked(data)
+            return copy.deepcopy(record)
+
+    def _load_locked(self) -> dict:
+        loaded = _read_json_file(self._path, self._default_payload)
+        requests = loaded.get('requests')
+        if not isinstance(requests, list):
+            loaded['requests'] = []
+        return loaded
+
+    def _write_locked(self, payload: dict) -> None:
+        _atomic_write_json(self._path, payload)
+
+    @staticmethod
+    def _find_request_locked(data: dict, request_id: str) -> dict | None:
+        for item in data.get('requests') or []:
+            if str(item.get('id') or '') == request_id:
+                return item
+        return None
+
+
 RUNTIME_CONFIG = _load_runtime_config(DEFAULT_CONFIG_FILE)
-tencent_runtime = RUNTIME_CONFIG.setdefault('asr', {}).setdefault('tencent', {})
-tencent_runtime['accounts'] = _normalize_tencent_accounts(tencent_runtime.get('accounts'), tencent_runtime)
+tencent_runtime = _sync_runtime_config_globals(RUNTIME_CONFIG)
 
 AUDIO_EXTS = {
     '.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg', '.opus', '.amr', '.mp4',
@@ -707,6 +838,109 @@ def summarize_tencent_ocr_usage(accounts: list[dict],
         'note': 'Tencent OCR QueryCallForConsole returns official console usage stats. It does not provide remaining free quota in this response.',
     }
 
+
+def validate_tencent_credentials(secret_id: str,
+                                 secret_key: str,
+                                 region: str,
+                                 biz_names: list[str] | None = None) -> dict:
+    if not secret_id or not secret_key:
+        raise RuntimeError('Missing secret_id or secret_key')
+    today = datetime.date.today()
+    start_date = today.replace(day=1).isoformat()
+    end_date = today.isoformat()
+    response, used_region = get_tencent_usage_by_date_with_fallback(
+        secret_id=secret_id,
+        secret_key=secret_key,
+        region=region or 'ap-beijing',
+        start_date=start_date,
+        end_date=end_date,
+        biz_names=biz_names or ['asr_rec'],
+    )
+    return {
+        'status': 'ok',
+        'validated_at': _utc_now_iso(),
+        'usage_region': used_region,
+        'start_date': start_date,
+        'end_date': end_date,
+        'biz_names': biz_names or ['asr_rec'],
+        'request_id': ((response.get('Response') or {}).get('RequestId') or ''),
+    }
+
+
+def _sanitize_request_record(record: dict) -> dict:
+    masked_secret_id = _mask_secret(str(record.get('secret_id') or ''))
+    masked_secret_key = _mask_secret(str(record.get('secret_key') or ''))
+    data = {
+        'id': str(record.get('id') or ''),
+        'applicant_name': str(record.get('applicant_name') or ''),
+        'account_name': str(record.get('account_name') or ''),
+        'secret_id_masked': masked_secret_id,
+        'secret_key_masked': masked_secret_key,
+        'region': str(record.get('region') or 'ap-beijing'),
+        'monthly_quota_seconds': _safe_int(record.get('monthly_quota_seconds'), 0),
+        'remark': str(record.get('remark') or ''),
+        'status': str(record.get('status') or ''),
+        'created_at': str(record.get('created_at') or ''),
+        'reviewed_at': str(record.get('reviewed_at') or ''),
+        'review_comment': str(record.get('review_comment') or ''),
+        'validation_result': copy.deepcopy(record.get('validation_result') or {}),
+        'approved_at': str(record.get('approved_at') or ''),
+        'undone_at': str(record.get('undone_at') or ''),
+        'can_undo': bool(record.get('can_undo')),
+    }
+    return data
+
+
+def _build_tencent_account_from_request(record: dict) -> dict:
+    return {
+        'name': str(record.get('account_name') or '').strip(),
+        'secret_id': str(record.get('secret_id') or '').strip(),
+        'secret_key': str(record.get('secret_key') or '').strip(),
+        'region': str(record.get('region') or 'ap-beijing').strip() or 'ap-beijing',
+        'monthly_quota_seconds': _safe_int(record.get('monthly_quota_seconds'), 0),
+    }
+
+
+def _active_account_names(runtime_config: dict) -> set[str]:
+    tencent_cfg = runtime_config.get('asr', {}).get('tencent', {})
+    names = set()
+    for item in _normalize_tencent_accounts(tencent_cfg.get('accounts'), tencent_cfg):
+        name = str(item.get('name') or '').strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _pending_account_names(records: list[dict], exclude_request_id: str | None = None) -> set[str]:
+    names = set()
+    for item in records:
+        if str(item.get('id') or '') == (exclude_request_id or ''):
+            continue
+        if str(item.get('status') or '') != REQUEST_STATUS_PENDING:
+            continue
+        name = str(item.get('account_name') or '').strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _mark_undo_capability(records: list[dict]) -> list[dict]:
+    latest_approved_id = ''
+    approved_records = [
+        item for item in records
+        if str(item.get('status') or '') == REQUEST_STATUS_APPROVED and not item.get('undone_at')
+    ]
+    approved_records.sort(key=lambda item: str(item.get('approved_at') or ''), reverse=True)
+    if approved_records:
+        latest_approved_id = str(approved_records[0].get('id') or '')
+    sanitized: list[dict] = []
+    for item in records:
+        copy_item = copy.deepcopy(item)
+        copy_item['can_undo'] = bool(
+            latest_approved_id and str(copy_item.get('id') or '') == latest_approved_id and not copy_item.get('undone_at')
+        )
+        sanitized.append(_sanitize_request_record(copy_item))
+    return sanitized
 
 def transcribe_with_tencent(url: str,
                             language: str | None,
@@ -1650,6 +1884,9 @@ def transcribe_url(url: str,
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--config-file',
+                        default=os.getenv('TRANSCRIBE_CONFIG_FILE', str(DEFAULT_CONFIG_FILE)),
+                        help='Runtime config JSON path')
     parser.add_argument('--model', default='small', help='Model name or model folder')
     parser.add_argument('--model-dir', default=str(DEFAULT_MODEL_DIR),
                         help='Directory to search for local model first (default: script folder)')
@@ -1771,6 +2008,15 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                         help='Tencent polling timeout seconds')
 
 
+def add_admin_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--request-store-file',
+                        default=os.getenv('TENCENT_ACCOUNT_REQUEST_STORE', str(DEFAULT_REQUEST_STORE_FILE)),
+                        help='Tencent account request store JSON path')
+    parser.add_argument('--admin-token',
+                        default=os.getenv('ADMIN_TOKEN', ''),
+                        help='Admin token for review/approval APIs')
+
+
 def run_transcribe_command(args: argparse.Namespace) -> int:
     model_dir = Path(args.model_dir).expanduser().resolve()
     model_pool = ModelPool(model_dir)
@@ -1826,6 +2072,10 @@ def serve_command(args: argparse.Namespace) -> int:
     host = args.host
     port = args.port
     model_pool = ModelPool(Path(args.model_dir).expanduser().resolve())
+    config_file = Path(args.config_file).expanduser().resolve()
+    runtime_config = _load_runtime_config(config_file)
+    runtime_tencent = _build_tencent_runtime(runtime_config)
+    request_store = TencentAccountRequestStore(Path(args.request_store_file).expanduser().resolve())
     cache = None if args.no_result_cache else ResultCache(
         Path(args.cache_dir).expanduser().resolve(),
         args.cache_max_entries,
@@ -1841,23 +2091,23 @@ def serve_command(args: argparse.Namespace) -> int:
         'beam_size': args.beam_size,
         'temperature': args.temperature,
         'audio_chunk_seconds': args.audio_chunk_seconds,
-        'asr_provider': args.asr_provider,
-        'tencent_secret_id': args.tencent_secret_id,
-        'tencent_secret_key': args.tencent_secret_key,
-        'tencent_region': args.tencent_region,
-        'tencent_engine_model_type': args.tencent_engine_model_type,
-        'tencent_channel_num': args.tencent_channel_num,
-        'tencent_res_text_format': args.tencent_res_text_format,
-        'tencent_quality_mode': args.tencent_quality_mode,
-        'tencent_hotword_id': args.tencent_hotword_id,
-        'tencent_hotword_list': args.tencent_hotword_list,
-        'tencent_convert_num_mode': args.tencent_convert_num_mode,
-        'tencent_filter_modal': args.tencent_filter_modal,
-        'tencent_filter_punc': args.tencent_filter_punc,
-        'tencent_filter_dirty': args.tencent_filter_dirty,
-        'tencent_poll_interval': args.tencent_poll_interval,
-        'tencent_poll_timeout': args.tencent_poll_timeout,
-        'tencent_accounts': [dict(item) for item in RUNTIME_CONFIG['asr']['tencent'].get('accounts', [])],
+        'asr_provider': str(runtime_config.get('asr', {}).get('default_provider') or args.asr_provider),
+        'tencent_secret_id': str(runtime_tencent.get('secret_id') or args.tencent_secret_id),
+        'tencent_secret_key': str(runtime_tencent.get('secret_key') or args.tencent_secret_key),
+        'tencent_region': str(runtime_tencent.get('region') or args.tencent_region),
+        'tencent_engine_model_type': str(runtime_tencent.get('engine_model_type') or args.tencent_engine_model_type),
+        'tencent_channel_num': _safe_int(runtime_tencent.get('channel_num'), args.tencent_channel_num),
+        'tencent_res_text_format': _safe_int(runtime_tencent.get('res_text_format'), args.tencent_res_text_format),
+        'tencent_quality_mode': str(runtime_tencent.get('quality_mode') or args.tencent_quality_mode),
+        'tencent_hotword_id': str(runtime_tencent.get('hotword_id') or args.tencent_hotword_id),
+        'tencent_hotword_list': str(runtime_tencent.get('hotword_list') or args.tencent_hotword_list),
+        'tencent_convert_num_mode': _safe_int(runtime_tencent.get('convert_num_mode'), args.tencent_convert_num_mode),
+        'tencent_filter_modal': _safe_int(runtime_tencent.get('filter_modal'), args.tencent_filter_modal),
+        'tencent_filter_punc': _safe_int(runtime_tencent.get('filter_punc'), args.tencent_filter_punc),
+        'tencent_filter_dirty': _safe_int(runtime_tencent.get('filter_dirty'), args.tencent_filter_dirty),
+        'tencent_poll_interval': _safe_int(runtime_tencent.get('poll_interval_seconds'), args.tencent_poll_interval),
+        'tencent_poll_timeout': _safe_int(runtime_tencent.get('poll_timeout_seconds'), args.tencent_poll_timeout),
+        'tencent_accounts': [dict(item) for item in runtime_tencent.get('accounts', [])],
         'task': args.task,
         'image_ocr_provider': args.image_ocr_provider,
         'ai_model': args.ocr_model,
@@ -1875,6 +2125,10 @@ def serve_command(args: argparse.Namespace) -> int:
             'result_cache': cache,
             'defaults': defaults,
             'tencent_account_pool': TencentCredentialPool(defaults['tencent_accounts']),
+            'config_file': config_file,
+            'config_lock': threading.Lock(),
+            'request_store': request_store,
+            'admin_token': str(args.admin_token or '').strip(),
         }
 
         def _json_resp(self, payload: Dict, status: int = 200) -> None:
@@ -1898,6 +2152,352 @@ def serve_command(args: argparse.Namespace) -> int:
         def _error(self, status: int, message: str) -> None:
             self._json_resp({'status': 'error', 'error': message}, status)
 
+        def _read_json_body(self) -> dict | None:
+            length = int(self.headers.get('Content-Length', '0') or '0')
+            if length <= 0:
+                self._error(400, 'Missing JSON body')
+                return None
+            body = self.rfile.read(length)
+            try:
+                payload = json.loads(body.decode('utf-8'))
+            except Exception as err:
+                self._error(400, str(err))
+                return None
+            if not isinstance(payload, dict):
+                self._error(400, 'JSON body must be an object')
+                return None
+            return payload
+
+        def _require_admin(self) -> bool:
+            expected = str(self.server_ctx.get('admin_token') or '').strip()
+            if not expected:
+                self._error(503, 'ADMIN_TOKEN not configured')
+                return False
+            provided = str(self.headers.get('X-Admin-Token') or '').strip()
+            if provided != expected:
+                self._error(401, 'Invalid admin token')
+                return False
+            return True
+
+        def _parse_request_action(self, path: str) -> tuple[str, str] | None:
+            parts = [part for part in path.split('/') if part]
+            if len(parts) == 4 and parts[0] == 'tencent' and parts[1] == 'account-requests':
+                return parts[2], parts[3]
+            return None
+
+        def _load_runtime_config(self) -> dict:
+            return _load_runtime_config(self.server_ctx['config_file'])
+
+        def _write_runtime_config(self, runtime_config: dict) -> None:
+            _atomic_write_json(self.server_ctx['config_file'], runtime_config)
+            _refresh_server_tencent_defaults(self.server_ctx, runtime_config)
+
+        def _current_request_records(self) -> list[dict]:
+            return self.server_ctx['request_store'].list_requests('all')
+
+        def _create_request(self, payload: dict) -> None:
+            applicant_name = str(payload.get('applicant_name') or '').strip()
+            account_name = str(payload.get('account_name') or '').strip()
+            secret_id = str(payload.get('secret_id') or '').strip()
+            secret_key = str(payload.get('secret_key') or '').strip()
+            region = str(payload.get('region') or 'ap-beijing').strip() or 'ap-beijing'
+            monthly_quota_seconds = _safe_int(payload.get('monthly_quota_seconds'), 0)
+            remark = str(payload.get('remark') or '').strip()
+
+            if not applicant_name:
+                self._error(400, 'Missing applicant_name')
+                return
+            if not account_name:
+                self._error(400, 'Missing account_name')
+                return
+            if not secret_id:
+                self._error(400, 'Missing secret_id')
+                return
+            if not secret_key:
+                self._error(400, 'Missing secret_key')
+                return
+            if monthly_quota_seconds < 0:
+                self._error(400, 'Invalid monthly_quota_seconds')
+                return
+
+            runtime_config = self._load_runtime_config()
+            existing_names = _active_account_names(runtime_config)
+            pending_names = _pending_account_names(self._current_request_records())
+            if account_name in existing_names:
+                self._error(409, 'account_name already exists in active config')
+                return
+            if account_name in pending_names:
+                self._error(409, 'account_name already exists in pending requests')
+                return
+
+            record = self.server_ctx['request_store'].create_request({
+                'id': f'req_{uuid.uuid4().hex[:12]}',
+                'applicant_name': applicant_name,
+                'account_name': account_name,
+                'secret_id': secret_id,
+                'secret_key': secret_key,
+                'region': region,
+                'monthly_quota_seconds': monthly_quota_seconds,
+                'remark': remark,
+                'status': REQUEST_STATUS_PENDING,
+                'created_at': _utc_now_iso(),
+                'reviewed_at': '',
+                'review_comment': '',
+                'validation_result': {'status': 'unverified'},
+                'approved_at': '',
+                'undone_at': '',
+                'config_snapshot_before': None,
+                'config_snapshot_after': None,
+            })
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(record)}, 201)
+
+        def _handle_list_requests(self, parsed) -> None:
+            if not self._require_admin():
+                return
+            params = parse_qs(parsed.query or '')
+            status = (params.get('status') or ['all'])[0]
+            allowed_status = {'all', REQUEST_STATUS_PENDING, REQUEST_STATUS_APPROVED, REQUEST_STATUS_REJECTED, REQUEST_STATUS_UNDONE}
+            if status not in allowed_status:
+                self._error(400, 'Invalid status filter')
+                return
+            records = self.server_ctx['request_store'].list_requests(status)
+            self._json_resp({'status': 'ok', 'requests': _mark_undo_capability(records)})
+
+        def _handle_direct_validate(self, payload: dict) -> None:
+            if not self._require_admin():
+                return
+            secret_id = str(payload.get('secret_id') or '').strip()
+            secret_key = str(payload.get('secret_key') or '').strip()
+            region = str(payload.get('region') or 'ap-beijing').strip() or 'ap-beijing'
+            try:
+                result = validate_tencent_credentials(secret_id, secret_key, region)
+                result['secret_id_masked'] = _mask_secret(secret_id)
+                self._json_resp(result)
+            except Exception as exc:
+                self._json_resp({
+                    'status': 'error',
+                    'validated_at': _utc_now_iso(),
+                    'secret_id_masked': _mask_secret(secret_id),
+                    'error': str(exc),
+                }, 400)
+
+        def _handle_validate_request(self, request_id: str) -> None:
+            if not self._require_admin():
+                return
+            record = self.server_ctx['request_store'].get_request(request_id)
+            if record is None:
+                self._error(404, 'Request not found')
+                return
+            if str(record.get('status') or '') != REQUEST_STATUS_PENDING:
+                self._error(409, 'Only pending requests can be validated')
+                return
+            try:
+                validation_result = validate_tencent_credentials(
+                    str(record.get('secret_id') or ''),
+                    str(record.get('secret_key') or ''),
+                    str(record.get('region') or 'ap-beijing'),
+                )
+            except Exception as exc:
+                validation_result = {
+                    'status': 'error',
+                    'validated_at': _utc_now_iso(),
+                    'error': str(exc),
+                }
+                response_status = 400
+            else:
+                response_status = 200
+
+            updated = self.server_ctx['request_store'].update_request(
+                request_id,
+                lambda current, _: current.__setitem__('validation_result', validation_result),
+            )
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(updated)}, response_status)
+
+        def _handle_approve_request(self, request_id: str, payload: dict) -> None:
+            if not self._require_admin():
+                return
+            record = self.server_ctx['request_store'].get_request(request_id)
+            if record is None:
+                self._error(404, 'Request not found')
+                return
+            if str(record.get('status') or '') != REQUEST_STATUS_PENDING:
+                self._error(409, 'Only pending requests can be approved')
+                return
+
+            review_comment = str(payload.get('review_comment') or '').strip()
+            account = _build_tencent_account_from_request(record)
+            with self.server_ctx['config_lock']:
+                runtime_config = self._load_runtime_config()
+                if account['name'] in _active_account_names(runtime_config):
+                    self._error(409, 'account_name already exists in active config')
+                    return
+                before_snapshot = copy.deepcopy(runtime_config)
+                tencent_cfg = runtime_config.setdefault('asr', {}).setdefault('tencent', {})
+                normalized_accounts = _normalize_tencent_accounts(tencent_cfg.get('accounts'), tencent_cfg)
+                tencent_cfg['accounts'] = [dict(item) for item in normalized_accounts]
+                tencent_cfg['accounts'].append(account)
+                self._write_runtime_config(runtime_config)
+                after_snapshot = copy.deepcopy(runtime_config)
+
+            approved_at = _utc_now_iso()
+
+            def _approve_update(current: dict, _: dict) -> None:
+                if str(current.get('status') or '') != REQUEST_STATUS_PENDING:
+                    raise RuntimeError('Request already reviewed')
+                current['status'] = REQUEST_STATUS_APPROVED
+                current['reviewed_at'] = approved_at
+                current['review_comment'] = review_comment
+                current['approved_at'] = approved_at
+                current['config_snapshot_before'] = before_snapshot
+                current['config_snapshot_after'] = after_snapshot
+
+            try:
+                updated = self.server_ctx['request_store'].update_request(request_id, _approve_update)
+            except RuntimeError as exc:
+                self._error(409, str(exc))
+                return
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(updated)})
+
+        def _handle_reject_request(self, request_id: str, payload: dict) -> None:
+            if not self._require_admin():
+                return
+            review_comment = str(payload.get('review_comment') or '').strip()
+
+            def _reject_update(current: dict, _: dict) -> None:
+                if str(current.get('status') or '') != REQUEST_STATUS_PENDING:
+                    raise RuntimeError('Only pending requests can be rejected')
+                current['status'] = REQUEST_STATUS_REJECTED
+                current['reviewed_at'] = _utc_now_iso()
+                current['review_comment'] = review_comment
+
+            try:
+                updated = self.server_ctx['request_store'].update_request(request_id, _reject_update)
+            except KeyError:
+                self._error(404, 'Request not found')
+                return
+            except RuntimeError as exc:
+                self._error(409, str(exc))
+                return
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(updated)})
+
+        def _handle_undo_request(self, request_id: str) -> None:
+            if not self._require_admin():
+                return
+            record = self.server_ctx['request_store'].get_request(request_id)
+            if record is None:
+                self._error(404, 'Request not found')
+                return
+            if str(record.get('status') or '') != REQUEST_STATUS_APPROVED:
+                self._error(409, 'Only approved requests can be undone')
+                return
+            snapshot_before = record.get('config_snapshot_before')
+            if not isinstance(snapshot_before, dict):
+                self._error(409, 'Missing config snapshot for undo')
+                return
+
+            all_records = self.server_ctx['request_store'].list_requests('all')
+            undo_candidates = [
+                item for item in all_records
+                if str(item.get('status') or '') == REQUEST_STATUS_APPROVED and not item.get('undone_at')
+            ]
+            undo_candidates.sort(key=lambda item: str(item.get('approved_at') or ''), reverse=True)
+            if not undo_candidates or str(undo_candidates[0].get('id') or '') != request_id:
+                self._error(409, 'Only the latest approved request can be undone')
+                return
+
+            with self.server_ctx['config_lock']:
+                self._write_runtime_config(copy.deepcopy(snapshot_before))
+
+            undone_at = _utc_now_iso()
+
+            def _undo_update(current: dict, _: dict) -> None:
+                if str(current.get('status') or '') != REQUEST_STATUS_APPROVED:
+                    raise RuntimeError('Request is not currently approved')
+                current['status'] = REQUEST_STATUS_UNDONE
+                current['undone_at'] = undone_at
+                current['reviewed_at'] = current.get('reviewed_at') or undone_at
+
+            try:
+                updated = self.server_ctx['request_store'].update_request(request_id, _undo_update)
+            except RuntimeError as exc:
+                self._error(409, str(exc))
+                return
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(updated)})
+
+        def _handle_transcribe(self, path: str, payload: dict) -> None:
+            url = payload.get('url')
+            if not url:
+                self._error(400, 'Missing url')
+                return
+
+            cfg = self.server_ctx['defaults']
+            req_lang = payload.get('language')
+            lang = req_lang.strip() if isinstance(req_lang, str) else cfg['language']
+            lang = lang or None
+
+            try:
+                beam = int(payload.get('beam_size', cfg['beam_size']))
+            except Exception:
+                self._error(400, 'Invalid beam_size')
+                return
+
+            try:
+                temp = float(payload.get('temperature', cfg['temperature']))
+            except Exception:
+                self._error(400, 'Invalid temperature')
+                return
+            try:
+                audio_chunk_seconds = int(payload.get('audio_chunk_seconds', cfg['audio_chunk_seconds']))
+            except Exception:
+                self._error(400, 'Invalid audio_chunk_seconds')
+                return
+            if audio_chunk_seconds < 0:
+                self._error(400, 'Invalid audio_chunk_seconds')
+                return
+
+            req = transcribe_url(
+                url=url,
+                model_name=payload.get('model', cfg['model']),
+                model_pool=self.server_ctx['model_pool'],
+                device=payload.get('device', cfg['device']),
+                compute_type=payload.get('compute_type', cfg['compute_type']),
+                language=lang,
+                vad_filter=not bool(payload.get('no_vad', False)) if payload.get('no_vad', False) else cfg['vad_filter'],
+                beam_size=beam,
+                temperature=temp,
+                audio_chunk_seconds=audio_chunk_seconds,
+                asr_provider=payload.get('asr_provider', cfg['asr_provider']),
+                tencent_secret_id=payload.get('tencent_secret_id', cfg['tencent_secret_id']),
+                tencent_secret_key=payload.get('tencent_secret_key', cfg['tencent_secret_key']),
+                tencent_region=payload.get('tencent_region', cfg['tencent_region']),
+                tencent_engine_model_type=payload.get('tencent_engine_model_type', cfg['tencent_engine_model_type']),
+                tencent_channel_num=int(payload.get('tencent_channel_num', cfg['tencent_channel_num'])),
+                tencent_res_text_format=int(payload.get('tencent_res_text_format', cfg['tencent_res_text_format'])),
+                tencent_quality_mode=payload.get('tencent_quality_mode', cfg['tencent_quality_mode']),
+                tencent_hotword_id=payload.get('tencent_hotword_id', cfg['tencent_hotword_id']),
+                tencent_hotword_list=payload.get('tencent_hotword_list', cfg['tencent_hotword_list']),
+                tencent_convert_num_mode=int(payload.get('tencent_convert_num_mode', cfg['tencent_convert_num_mode'])),
+                tencent_filter_modal=int(payload.get('tencent_filter_modal', cfg['tencent_filter_modal'])),
+                tencent_filter_punc=int(payload.get('tencent_filter_punc', cfg['tencent_filter_punc'])),
+                tencent_filter_dirty=int(payload.get('tencent_filter_dirty', cfg['tencent_filter_dirty'])),
+                tencent_poll_interval=int(payload.get('tencent_poll_interval', cfg['tencent_poll_interval'])),
+                tencent_poll_timeout=int(payload.get('tencent_poll_timeout', cfg['tencent_poll_timeout'])),
+                tencent_account_pool=self.server_ctx['tencent_account_pool'],
+                task=payload.get('task') or ('image' if path == '/ocr' else cfg['task']),
+                image_ocr_provider=payload.get('image_ocr_provider', cfg['image_ocr_provider']),
+                ai_model=payload.get('ocr_model', cfg['ai_model']),
+                ai_endpoint=payload.get('ocr_api_endpoint', cfg['ai_endpoint']),
+                ai_timeout=int(payload.get('ocr_timeout', cfg['ai_timeout'])),
+                ai_api_key=payload.get('ocr_api_key', cfg['ai_api_key']),
+                result_cache=self.server_ctx['result_cache'] if path == '/transcribe' else None,
+            )
+            req['duration_ms'] = int(req.get('duration', 0) * 1000) if req.get('duration') else 0
+            if payload.get('raw') is True:
+                self._json_resp(req, 200 if req.get('status') == 'ok' else 500)
+            else:
+                wrapped = wrap_result_payload(req)
+                self._json_resp(wrapped, 200)
+
         def do_GET(self):
             try:
                 parsed = urlparse(self.path)
@@ -1907,8 +2507,23 @@ def serve_command(args: argparse.Namespace) -> int:
                     else:
                         self._error(404, 'index.html not found')
                     return
+                if parsed.path in {'/apply', '/apply.html'}:
+                    if DEFAULT_APPLY_PAGE_FILE.exists():
+                        self._file_resp(DEFAULT_APPLY_PAGE_FILE, 'text/html; charset=utf-8')
+                    else:
+                        self._error(404, 'apply.html not found')
+                    return
+                if parsed.path in {'/review', '/review.html'}:
+                    if DEFAULT_REVIEW_PAGE_FILE.exists():
+                        self._file_resp(DEFAULT_REVIEW_PAGE_FILE, 'text/html; charset=utf-8')
+                    else:
+                        self._error(404, 'review.html not found')
+                    return
                 if parsed.path == '/health':
                     self._json_resp({'status': 'ok'})
+                    return
+                if parsed.path == '/tencent/account-requests':
+                    self._handle_list_requests(parsed)
                     return
                 if parsed.path == '/tencent/quota':
                     pool = self.server_ctx['tencent_account_pool']
@@ -1942,95 +2557,38 @@ def serve_command(args: argparse.Namespace) -> int:
 
         def do_POST(self):
             try:
-                if self.path not in {'/transcribe', '/ocr'}:
+                parsed = urlparse(self.path)
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+
+                if parsed.path in {'/transcribe', '/ocr'}:
+                    self._handle_transcribe(parsed.path, payload)
+                    return
+                if parsed.path == '/tencent/account-requests':
+                    self._create_request(payload)
+                    return
+                if parsed.path == '/tencent/account-credentials/validate':
+                    self._handle_direct_validate(payload)
+                    return
+                request_action = self._parse_request_action(parsed.path)
+                if request_action is None:
                     self._error(404, 'Not Found')
                     return
-
-                length = int(self.headers.get('Content-Length', '0') or '0')
-                if length <= 0:
-                    self._error(400, 'Missing JSON body')
+                request_id, action = request_action
+                if action == 'validate':
+                    self._handle_validate_request(request_id)
                     return
-
-                body = self.rfile.read(length)
-                try:
-                    payload = json.loads(body.decode('utf-8'))
-                except Exception as err:
-                    self._error(400, str(err))
+                if action == 'approve':
+                    self._handle_approve_request(request_id, payload)
                     return
-
-                url = payload.get('url')
-                if not url:
-                    self._error(400, 'Missing url')
+                if action == 'reject':
+                    self._handle_reject_request(request_id, payload)
                     return
-
-                cfg = self.server_ctx['defaults']
-                req_lang = payload.get('language')
-                lang = req_lang.strip() if isinstance(req_lang, str) else cfg['language']
-                lang = lang or None
-
-                try:
-                    beam = int(payload.get('beam_size', cfg['beam_size']))
-                except Exception:
-                    self._error(400, 'Invalid beam_size')
+                if action == 'undo':
+                    self._handle_undo_request(request_id)
                     return
-
-                try:
-                    temp = float(payload.get('temperature', cfg['temperature']))
-                except Exception:
-                    self._error(400, 'Invalid temperature')
-                    return
-                try:
-                    audio_chunk_seconds = int(payload.get('audio_chunk_seconds', cfg['audio_chunk_seconds']))
-                except Exception:
-                    self._error(400, 'Invalid audio_chunk_seconds')
-                    return
-                if audio_chunk_seconds < 0:
-                    self._error(400, 'Invalid audio_chunk_seconds')
-                    return
-
-                req = transcribe_url(
-                    url=url,
-                    model_name=payload.get('model', cfg['model']),
-                    model_pool=self.server_ctx['model_pool'],
-                    device=payload.get('device', cfg['device']),
-                    compute_type=payload.get('compute_type', cfg['compute_type']),
-                    language=lang,
-                    vad_filter=not bool(payload.get('no_vad', False)) if payload.get('no_vad', False) else cfg['vad_filter'],
-                    beam_size=beam,
-                    temperature=temp,
-                    audio_chunk_seconds=audio_chunk_seconds,
-                    asr_provider=payload.get('asr_provider', cfg['asr_provider']),
-                    tencent_secret_id=payload.get('tencent_secret_id', cfg['tencent_secret_id']),
-                    tencent_secret_key=payload.get('tencent_secret_key', cfg['tencent_secret_key']),
-                    tencent_region=payload.get('tencent_region', cfg['tencent_region']),
-                    tencent_engine_model_type=payload.get('tencent_engine_model_type', cfg['tencent_engine_model_type']),
-                    tencent_channel_num=int(payload.get('tencent_channel_num', cfg['tencent_channel_num'])),
-                    tencent_res_text_format=int(payload.get('tencent_res_text_format', cfg['tencent_res_text_format'])),
-                    tencent_quality_mode=payload.get('tencent_quality_mode', cfg['tencent_quality_mode']),
-                    tencent_hotword_id=payload.get('tencent_hotword_id', cfg['tencent_hotword_id']),
-                    tencent_hotword_list=payload.get('tencent_hotword_list', cfg['tencent_hotword_list']),
-                    tencent_convert_num_mode=int(payload.get('tencent_convert_num_mode', cfg['tencent_convert_num_mode'])),
-                    tencent_filter_modal=int(payload.get('tencent_filter_modal', cfg['tencent_filter_modal'])),
-                    tencent_filter_punc=int(payload.get('tencent_filter_punc', cfg['tencent_filter_punc'])),
-                    tencent_filter_dirty=int(payload.get('tencent_filter_dirty', cfg['tencent_filter_dirty'])),
-                    tencent_poll_interval=int(payload.get('tencent_poll_interval', cfg['tencent_poll_interval'])),
-                    tencent_poll_timeout=int(payload.get('tencent_poll_timeout', cfg['tencent_poll_timeout'])),
-                    tencent_account_pool=self.server_ctx['tencent_account_pool'],
-                    task=payload.get('task') or ('image' if self.path == '/ocr' else cfg['task']),
-                    image_ocr_provider=payload.get('image_ocr_provider', cfg['image_ocr_provider']),
-                    ai_model=payload.get('ocr_model', cfg['ai_model']),
-                    ai_endpoint=payload.get('ocr_api_endpoint', cfg['ai_endpoint']),
-                    ai_timeout=int(payload.get('ocr_timeout', cfg['ai_timeout'])),
-                    ai_api_key=payload.get('ocr_api_key', cfg['ai_api_key']),
-                    result_cache=self.server_ctx['result_cache'] if self.path == '/transcribe' else None,
-                )
-                req['duration_ms'] = int(req.get('duration', 0) * 1000) if req.get('duration') else 0
-                if payload.get('raw') is True:
-                    self._json_resp(req, 200 if req.get('status') == 'ok' else 500)
-                else:
-                    wrapped = wrap_result_payload(req)
-                    # Keep wrapped response HTTP 200 to avoid transport-layer retries.
-                    self._json_resp(wrapped, 200)
+                self._error(404, 'Not Found')
             except Exception as exc:
                 import traceback
                 self.log_error('POST %s failed: %s', self.path, traceback.format_exc())
@@ -2078,6 +2636,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         'serve',
         '--host', args.host,
         '--port', str(args.port),
+        '--config-file', args.config_file,
         '--model', args.model,
         '--model-dir', args.model_dir,
         '--device', args.device,
@@ -2111,6 +2670,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         '--tencent-filter-dirty', str(args.tencent_filter_dirty),
         '--tencent-poll-interval', str(args.tencent_poll_interval),
         '--tencent-poll-timeout', str(args.tencent_poll_timeout),
+        '--request-store-file', args.request_store_file,
+        '--admin-token', args.admin_token,
     ]
     if args.no_vad:
         cmd.append('--no-vad')
@@ -2183,11 +2744,13 @@ def parse_args() -> argparse.Namespace:
     p_serve.add_argument('--host', default='0.0.0.0', help='bind host')
     p_serve.add_argument('--port', type=int, default=8000, help='bind port')
     add_common_args(p_serve)
+    add_admin_args(p_serve)
 
     p_start = subparsers.add_parser('start', help='start HTTP service as background')
     p_start.add_argument('--host', default='0.0.0.0', help='bind host')
     p_start.add_argument('--port', type=int, default=8000, help='bind port')
     add_common_args(p_start)
+    add_admin_args(p_start)
     p_start.add_argument('--pid-file', default=str(DEFAULT_PID_FILE), help='pid file path')
     p_start.add_argument('--log-file', default=str(DEFAULT_LOG_FILE), help='log file path')
 

@@ -657,6 +657,8 @@
       <div class="actions">
         <button id="refreshBtn" class="primary">刷新用量</button>
         <a class="btn ghost" href="/tencent/quota" target="_blank" rel="noreferrer">查看原始 JSON</a>
+        <a class="btn ghost" href="/apply">提交账号申请</a>
+        <a class="btn ghost" href="/review">打开审核页</a>
       </div>
     </section>
 
@@ -724,10 +726,23 @@
               <strong>统一转写</strong>
               <p>音频和图片统一走 <code>POST /transcribe</code>，图片可自动识别，也可显式传 <code>task=image</code>。</p>
             </div>
+            <div class="quick-item">
+              <strong>账号申请</strong>
+              <p>新腾讯账号先走 <code>/apply</code> 提交申请，审核通过后才写入配置并热加载。</p>
+            </div>
+            <div class="quick-item">
+              <strong>审核撤销</strong>
+              <p>管理员在 <code>/review</code> 验证密钥、通过、拒绝，或撤销最近一次已生效审批。</p>
+            </div>
           </div>
           <div class="mono-note">
             <pre>GET  /health
 GET  /tencent/quota
+GET  /apply
+GET  /review
+GET  /tencent/account-requests
+POST /tencent/account-credentials/validate
+POST /tencent/account-requests
 POST /transcribe</pre>
             <pre>curl --noproxy '*' -s 'http://127.0.0.1:8014/tencent/quota'
 
@@ -761,6 +776,9 @@ curl --noproxy '*' -s \
           <ul class="doc-list">
             <li>健康检查：<code>GET /health</code></li>
             <li>用量查询：<code>GET /tencent/quota</code></li>
+            <li>申请列表：<code>GET /tencent/account-requests</code>（管理员口令）</li>
+            <li>密钥验证：<code>POST /tencent/account-credentials/validate</code>（管理员口令）</li>
+            <li>提交申请：<code>POST /tencent/account-requests</code></li>
             <li>通用转文字：<code>POST /transcribe</code>（音频 / 图片统一入口）</li>
           </ul>
           <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
@@ -784,6 +802,7 @@ curl --noproxy '*' -s \
             <li>在 <code>asr.tencent.accounts</code> 中配置多个腾讯账号，语音转写和图片 OCR 会复用这组密钥。</li>
             <li>免费测试号如果是“每月免费 10 小时”，填 <code>monthly_quota_seconds: 36000</code>。</li>
             <li>服务默认轮询账号；如果请求里带单次密钥，则单次密钥优先。</li>
+            <li>审批数据单独保存在本地 JSON；审核通过后才会改 <code>transcribe_config.json</code>。</li>
           </ul>
           <pre>cp transcribe_config.template.json transcribe_config.json</pre>
           <pre>{

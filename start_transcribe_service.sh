@@ -16,6 +16,7 @@ LANGUAGE="${LANGUAGE:-zh}"
 DEVICE="${DEVICE:-cpu}"
 COMPUTE_TYPE="${COMPUTE_TYPE:-int8}"
 IMAGE_OCR_PROVIDER="${IMAGE_OCR_PROVIDER:-tencent}"
+ADMIN_TOKEN="${ADMIN_TOKEN:-zhangzhi}"
 
 export NO_PROXY="127.0.0.1,localhost"
 export no_proxy="127.0.0.1,localhost"
@@ -32,5 +33,6 @@ export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="${PADDLE_PDX_DISABLE_MODEL_SOURCE_
   --compute-type "${COMPUTE_TYPE}" \
   --language "${LANGUAGE}" \
   --image-ocr-provider "${IMAGE_OCR_PROVIDER}" \
+  --admin-token "${ADMIN_TOKEN}" \
   --pid-file "${PID_FILE}" \
   --log-file "${LOG_FILE}" "$@"

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tencent Key 申请</title>
+  <style>
+    :root {
+      --bg: #f4efe7;
+      --panel: rgba(255, 252, 247, 0.92);
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: rgba(31, 41, 55, 0.12);
+      --accent: #bb3e03;
+      --accent-strong: #9a3412;
+      --ok: #166534;
+      --err: #b91c1c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Noto Sans SC", "PingFang SC", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(250, 204, 21, 0.18), transparent 30%),
+        radial-gradient(circle at bottom right, rgba(191, 219, 254, 0.28), transparent 34%),
+        linear-gradient(135deg, #f7efe2, #e9f1f7);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(860px, calc(100vw - 32px));
+      margin: 32px auto;
+      display: grid;
+      gap: 20px;
+    }
+
+    .hero, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 16px 48px rgba(15, 23, 42, 0.08);
+      backdrop-filter: blur(16px);
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    h1, h2, p { margin: 0; }
+
+    h1 {
+      margin-top: 10px;
+      font-size: clamp(32px, 5vw, 52px);
+      line-height: 1.05;
+    }
+
+    .hero p, .sub {
+      margin-top: 12px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 18px;
+      flex-wrap: wrap;
+    }
+
+    .btn, button {
+      border: 0;
+      border-radius: 999px;
+      min-height: 46px;
+      padding: 0 18px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    button {
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      color: #fff;
+    }
+
+    .btn {
+      background: rgba(255,255,255,0.6);
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+
+    form {
+      display: grid;
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid rgba(31, 41, 55, 0.14);
+      border-radius: 16px;
+      padding: 14px 16px;
+      font: inherit;
+      background: rgba(255,255,255,0.92);
+      color: var(--ink);
+    }
+
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+
+    .status {
+      border-radius: 16px;
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.72);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      line-height: 1.7;
+      white-space: pre-wrap;
+    }
+
+    .status.ok { color: var(--ok); border-color: rgba(22, 101, 52, 0.18); }
+    .status.err { color: var(--err); border-color: rgba(185, 28, 28, 0.18); }
+
+    .hint-list {
+      margin: 16px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    code {
+      background: rgba(15, 23, 42, 0.06);
+      border-radius: 8px;
+      padding: 2px 6px;
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100vw - 20px, 860px); margin: 20px auto; }
+      .hero, .panel { padding: 20px; border-radius: 20px; }
+      .grid { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; }
+      .btn, button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">Tencent Account Request</div>
+      <h1>先申请，再入库。</h1>
+      <p>申请页不会直接改服务器里的 <code>transcribe_config.json</code>。你提交名称和腾讯密钥后，会生成待审核记录；管理员审核通过后才会把账号加入账号池并热加载生效。</p>
+      <div class="actions">
+        <a class="btn" href="/">返回首页</a>
+        <a class="btn" href="/review">去审核页</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>提交申请</h2>
+      <p class="sub">第一版仅支持新增账号。账号名称必须唯一，建议使用能区分业务来源的名字。</p>
+      <form id="applyForm">
+        <div class="grid">
+          <div>
+            <label for="applicantName">申请人名称</label>
+            <input id="applicantName" name="applicantName" placeholder="例如：市场组-张三" required>
+          </div>
+          <div>
+            <label for="accountName">腾讯账号名称</label>
+            <input id="accountName" name="accountName" placeholder="例如：ocr-marketing-prod" required>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div>
+            <label for="secretId">SecretId</label>
+            <input id="secretId" name="secretId" placeholder="AKID..." required>
+          </div>
+          <div>
+            <label for="region">Region</label>
+            <input id="region" name="region" value="ap-beijing" placeholder="ap-beijing">
+          </div>
+        </div>
+
+        <div>
+          <label for="secretKey">SecretKey</label>
+          <input id="secretKey" name="secretKey" type="password" placeholder="请输入腾讯云 SecretKey" required>
+        </div>
+
+        <div class="grid">
+          <div>
+            <label for="monthlyQuotaSeconds">月额度秒数</label>
+            <input id="monthlyQuotaSeconds" name="monthlyQuotaSeconds" type="number" min="0" step="1" value="36000">
+          </div>
+          <div>
+            <label for="remark">备注</label>
+            <input id="remark" name="remark" placeholder="例如：每月免费 10 小时测试账号">
+          </div>
+        </div>
+
+        <button id="submitBtn" type="submit">提交申请</button>
+      </form>
+      <div id="statusBox" class="status" style="margin-top:16px;">等待提交。</div>
+      <ul class="hint-list">
+        <li>提交成功后只会进入待审核列表，不会立即生效。</li>
+        <li>审核页支持管理员先验证密钥，再决定通过或拒绝。</li>
+        <li>审核通过后账号会追加到 <code>asr.tencent.accounts</code>。</li>
+      </ul>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById('applyForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const statusBox = document.getElementById('statusBox');
+
+    function setStatus(message, type) {
+      statusBox.textContent = message;
+      statusBox.className = `status ${type || ''}`.trim();
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submitBtn.disabled = true;
+      setStatus('正在提交申请...', '');
+
+      const payload = {
+        applicant_name: document.getElementById('applicantName').value.trim(),
+        account_name: document.getElementById('accountName').value.trim(),
+        secret_id: document.getElementById('secretId').value.trim(),
+        secret_key: document.getElementById('secretKey').value.trim(),
+        region: document.getElementById('region').value.trim() || 'ap-beijing',
+        monthly_quota_seconds: Number(document.getElementById('monthlyQuotaSeconds').value || 0),
+        remark: document.getElementById('remark').value.trim(),
+      };
+
+      try {
+        const response = await fetch('/tencent/account-requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok || data.status !== 'ok') {
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+        const req = data.request || {};
+        setStatus(
+          `申请已提交\n申请单号：${req.id || '-'}\n账号名称：${req.account_name || '-'}\n状态：${req.status || '-'}\n创建时间：${req.created_at || '-'}`,
+          'ok',
+        );
+        form.reset();
+        document.getElementById('region').value = 'ap-beijing';
+        document.getElementById('monthlyQuotaSeconds').value = '36000';
+      } catch (error) {
+        setStatus(`提交失败：${error.message}`, 'err');
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
