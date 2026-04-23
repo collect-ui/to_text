@@ -344,6 +344,18 @@ class TencentAccountRequestStore:
             self._write_locked(data)
             return copy.deepcopy(record)
 
+    def delete_request(self, request_id: str) -> dict:
+        with self._lock:
+            data = self._load_locked()
+            records = data.get('requests') or []
+            for index, item in enumerate(records):
+                if str(item.get('id') or '') == request_id:
+                    removed = copy.deepcopy(item)
+                    del records[index]
+                    self._write_locked(data)
+                    return removed
+            raise KeyError(request_id)
+
     def _load_locked(self) -> dict:
         loaded = _read_json_file(self._path, self._default_payload)
         requests = loaded.get('requests')
@@ -2447,6 +2459,23 @@ def serve_command(args: argparse.Namespace) -> int:
                 return
             self._json_resp({'status': 'ok', 'request': _sanitize_request_record(updated)})
 
+        def _handle_delete_request(self, request_id: str) -> None:
+            if not self._require_admin():
+                return
+            record = self.server_ctx['request_store'].get_request(request_id)
+            if record is None:
+                self._error(404, 'Request not found')
+                return
+            if str(record.get('status') or '') == REQUEST_STATUS_APPROVED:
+                self._error(409, 'Approved requests must be undone before deletion')
+                return
+            try:
+                deleted = self.server_ctx['request_store'].delete_request(request_id)
+            except KeyError:
+                self._error(404, 'Request not found')
+                return
+            self._json_resp({'status': 'ok', 'request': _sanitize_request_record(deleted)})
+
         def _handle_transcribe(self, path: str, payload: dict) -> None:
             url = payload.get('url')
             if not url:
@@ -2610,6 +2639,9 @@ def serve_command(args: argparse.Namespace) -> int:
                     return
                 if action == 'undo':
                     self._handle_undo_request(request_id)
+                    return
+                if action == 'delete':
+                    self._handle_delete_request(request_id)
                     return
                 self._error(404, 'Not Found')
             except Exception as exc:

@@ -121,6 +121,7 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 - `POST /tencent/account-requests/{id}/approve`（管理员）
 - `POST /tencent/account-requests/{id}/reject`（管理员）
 - `POST /tencent/account-requests/{id}/undo`（管理员）
+- `POST /tencent/account-requests/{id}/delete`（管理员；已通过记录需先撤销）
 - `POST /transcribe`
 
 图片与音频统一走 `POST /transcribe`：

@@ -327,7 +327,7 @@
 
       <section class="panel">
         <h2>申请列表</h2>
-        <p class="sub">列表只显示脱敏后的 SecretId / SecretKey。审批前建议先做一次验证，审批后会立即写入 <code>transcribe_config.json</code> 并热加载。</p>
+        <p class="sub">列表只显示脱敏后的 SecretId / SecretKey。审批前建议先做一次验证，审批后会立即写入 <code>transcribe_config.json</code> 并热加载。待审核、已拒绝、已撤销的记录支持删除；已通过记录需先撤销再删除。</p>
         <div id="requestList" class="list" style="margin-top:18px;"></div>
       </section>
     </section>
@@ -401,6 +401,7 @@
           actionButton('通过', 'primary', 'approve', item.id, item.status !== 'pending' || disabled),
           actionButton('拒绝', 'warn', 'reject', item.id, item.status !== 'pending' || disabled),
           actionButton('撤销', 'danger', 'undo', item.id, !item.can_undo || disabled),
+          actionButton('删除', 'danger', 'delete', item.id, item.status === 'approved' || disabled),
         ].join('');
         return `
           <article class="card">
@@ -486,6 +487,9 @@
       }
       const requestId = button.dataset.requestId;
       const action = button.dataset.action;
+      if (action === 'delete' && !window.confirm(`确认删除申请记录 ${requestId} 吗？此操作不可恢复。`)) {
+        return;
+      }
       const reviewComment = (action === 'approve' || action === 'reject')
         ? window.prompt(action === 'approve' ? '审核通过备注（可为空）' : '拒绝原因（建议填写）', '')
         : '';
