@@ -41,6 +41,30 @@
       margin: 24px auto 48px;
     }
 
+    .shell > * + * {
+      margin-top: 18px;
+    }
+
+    .shell,
+    .grid,
+    .grid > *,
+    .stack,
+    .panel,
+    .controls,
+    .controls > *,
+    .stats,
+    .stats > *,
+    .cards,
+    .cards > *,
+    .doc-grid,
+    .doc-grid > *,
+    .meta,
+    .meta > *,
+    .query-meta-grid,
+    .query-meta-grid > * {
+      min-width: 0;
+    }
+
     .hero {
       background: linear-gradient(135deg, rgba(255, 248, 233, 0.92), rgba(247, 235, 219, 0.86));
       border: 1px solid rgba(28, 34, 27, 0.08);
@@ -65,7 +89,9 @@
     .eyebrow {
       display: inline-flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 8px;
+      max-width: 100%;
       padding: 8px 12px;
       border-radius: 999px;
       background: rgba(28, 34, 27, 0.06);
@@ -136,9 +162,8 @@
 
     .grid {
       display: grid;
-      grid-template-columns: 1.2fr 0.8fr;
+      grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.9fr);
       gap: 18px;
-      margin-top: 18px;
     }
 
     .panel {
@@ -148,6 +173,10 @@
       box-shadow: var(--shadow);
       padding: 22px;
       backdrop-filter: blur(12px);
+    }
+
+    .panel > *:first-child {
+      margin-top: 0;
     }
 
     .panel h2 {
@@ -163,7 +192,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
       margin-top: 18px;
     }
@@ -187,7 +216,7 @@
 
     .stats {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
       gap: 12px;
       margin-top: 18px;
     }
@@ -213,7 +242,7 @@
 
     .cards {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 1fr;
       gap: 14px;
       margin-top: 18px;
     }
@@ -225,8 +254,47 @@
       border: 1px solid rgba(28, 34, 27, 0.08);
     }
 
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .sidebar-card {
+      padding: 22px;
+    }
+
+    .sidebar-card h2 {
+      margin-bottom: 10px;
+    }
+
+    .quick-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .quick-item {
+      padding: 16px 18px;
+      border-radius: var(--radius-lg);
+      background: rgba(255,255,255,0.68);
+      border: 1px solid rgba(28, 34, 27, 0.08);
+    }
+
+    .quick-item strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+
+    .quick-item p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+      font-size: 14px;
+    }
+
     .section-title {
-      margin: 20px 0 10px;
+      margin: 28px 0 10px;
       font-size: 18px;
     }
 
@@ -239,10 +307,27 @@
 
     .account-head {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 14px;
+    }
+
+    .account-title {
+      min-width: 0;
+    }
+
+    .account-name {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .account-subtitle {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 6px;
+      overflow-wrap: anywhere;
     }
 
     .pill {
@@ -254,6 +339,7 @@
       border-radius: 999px;
       font-size: 12px;
       font-weight: 700;
+      text-align: center;
     }
 
     .pill.good {
@@ -288,6 +374,23 @@
       gap: 10px;
       font-size: 13px;
       color: var(--muted);
+    }
+
+    .meta div {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.55);
+      border: 1px solid rgba(28, 34, 27, 0.06);
+      overflow-wrap: anywhere;
+    }
+
+    .meta strong {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      color: var(--ink);
     }
 
     .doc-grid {
@@ -330,6 +433,7 @@
 
     code {
       font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+      overflow-wrap: anywhere;
     }
 
     .status-line {
@@ -369,13 +473,177 @@
       font-weight: 700;
     }
 
+    .query-meta-grid > div {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.45);
+      border: 1px solid rgba(28, 34, 27, 0.05);
+      overflow-wrap: anywhere;
+    }
+
+    .mono-note {
+      margin-top: 16px;
+    }
+
+    .mono-note pre + pre {
+      margin-top: 12px;
+    }
+
+    .doc-list {
+      margin: 14px 0 0;
+      padding-left: 18px;
+    }
+
+    .doc-list li + li {
+      margin-top: 8px;
+    }
+
+    @media (min-width: 1180px) {
+      .cards.dual {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 1120px) {
+      .grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
     @media (max-width: 980px) {
-      .grid,
       .doc-grid,
-      .cards,
-      .stats,
-      .controls {
+      .meta,
+      .query-meta-grid {
         grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      body {
+        font-size: 17px;
+      }
+
+      .shell {
+        width: min(100vw - 20px, 1240px);
+        margin: 10px auto 28px;
+      }
+
+      .hero,
+      .panel,
+      .sidebar-card {
+        padding: 20px 16px;
+        border-radius: 22px;
+      }
+
+      h1 {
+        font-size: clamp(34px, 11vw, 52px);
+        margin: 14px 0 10px;
+        line-height: 1.04;
+      }
+
+      .hero p,
+      .panel .sub,
+      .section-sub,
+      .quick-item p,
+      .doc p,
+      .doc li,
+      .status-line,
+      .query-meta-grid,
+      .meta,
+      label,
+      input {
+        font-size: 16px;
+      }
+
+      .eyebrow,
+      .pill,
+      .stat .k,
+      .account-subtitle,
+      .meta strong {
+        font-size: 13px;
+      }
+
+      .hero p {
+        line-height: 1.75;
+      }
+
+      .actions {
+        flex-direction: column;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .btn,
+      button {
+        width: 100%;
+        min-height: 50px;
+        padding: 14px 18px;
+        font-size: 16px;
+      }
+
+      .panel h2,
+      .doc h3 {
+        font-size: 22px;
+      }
+
+      .section-title,
+      .query-meta h3 {
+        font-size: 18px;
+      }
+
+      .account-name {
+        font-size: 22px;
+      }
+
+      .stat .v {
+        font-size: 30px;
+      }
+
+      .stat,
+      .quick-item,
+      .account,
+      .doc,
+      .query-meta {
+        padding: 16px;
+      }
+
+      .stats {
+        gap: 10px;
+      }
+
+      .controls,
+      .stats,
+      .doc-grid,
+      .meta,
+      .query-meta-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .controls {
+        gap: 10px;
+      }
+
+      input {
+        min-height: 48px;
+        border-radius: 14px;
+      }
+
+      .account-head {
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .pill {
+        width: 100%;
+        min-height: 38px;
+      }
+
+      pre {
+        padding: 12px;
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
       }
     }
   </style>
@@ -427,7 +695,7 @@
           </div>
         </div>
         <h3 class="section-title">ASR 账号用量</h3>
-        <div class="cards" id="accountCards"></div>
+        <div class="cards dual" id="accountCards"></div>
         <h3 class="section-title">OCR 用量</h3>
         <p class="section-sub">这里展示腾讯 OCR 控制台的官方调用统计。目前返回的是调用次数、成功数、失败数和计费次数，不包含剩余额度。</p>
         <div class="stats" id="ocrSummaryStats">
@@ -436,35 +704,65 @@
           <div class="stat"><div class="k">总失败次数</div><div class="v">-</div></div>
           <div class="stat"><div class="k">总计费次数</div><div class="v">-</div></div>
         </div>
-        <div class="cards" id="ocrAccountCards"></div>
+        <div class="cards dual" id="ocrAccountCards"></div>
       </div>
 
-      <div class="panel">
-        <h2>快速入口</h2>
-        <p class="sub">调试时最常用的三个接口。对外统一建议走 <code>POST /transcribe</code>；图片 URL 会自动识别，也可以显式传 <code>task=image</code>。<code>/ocr</code> 仅保留兼容。当前用量查询针对腾讯 ASR。账号选择策略是“优先剩余小时最多的账号”，并带 3 分钟的短时预扣减，避免短时间内一直打同一个号。</p>
-        <pre>GET  /health
+      <div class="stack">
+        <aside class="panel sidebar-card">
+          <h2>快速入口</h2>
+          <p class="sub">右侧不再堆大段说明，改成短说明加命令块。调试时优先看健康检查、额度查询和统一转写入口。</p>
+          <div class="quick-list">
+            <div class="quick-item">
+              <strong>健康检查</strong>
+              <p>确认服务是否在线，适合部署后第一时间验证。</p>
+            </div>
+            <div class="quick-item">
+              <strong>额度查询</strong>
+              <p>查看腾讯 ASR 用量、剩余额度、账号选择策略和 OCR 调用统计。</p>
+            </div>
+            <div class="quick-item">
+              <strong>统一转写</strong>
+              <p>音频和图片统一走 <code>POST /transcribe</code>，图片可自动识别，也可显式传 <code>task=image</code>。</p>
+            </div>
+          </div>
+          <div class="mono-note">
+            <pre>GET  /health
 GET  /tencent/quota
 POST /transcribe</pre>
-        <pre>curl --noproxy '*' -s 'http://127.0.0.1:8014/tencent/quota'
+            <pre>curl --noproxy '*' -s 'http://127.0.0.1:8014/tencent/quota'
 
 curl --noproxy '*' -s \
   'http://127.0.0.1:8014/tencent/quota?start_date=2026-04-01&end_date=2026-04-21&biz_names=asr_rec,asr_rt'</pre>
-        <pre>如果想强制刷新腾讯最新用量：
+          </div>
+        </aside>
 
-curl --noproxy '*' -s \
+        <aside class="panel sidebar-card">
+          <h2>选择策略</h2>
+          <p class="sub">当前默认优先剩余小时最多的账号，并带 3 分钟短时预扣减，避免短时间请求持续压到同一个腾讯号。</p>
+          <div class="query-meta">
+            <h3>强制刷新用量</h3>
+            <div class="query-meta-grid">
+              <div><strong>参数</strong><span><code>refresh=1</code></span></div>
+              <div><strong>用途</strong><span>跳过短时缓存，拉取最新腾讯用量</span></div>
+            </div>
+          </div>
+          <pre>curl --noproxy '*' -s \
   'http://127.0.0.1:8014/tencent/quota?refresh=1'</pre>
+        </aside>
       </div>
     </section>
 
-    <section class="panel" style="margin-top: 18px;">
+    <section class="panel">
       <h2>使用文档</h2>
       <p class="sub">把接口使用和账号注册配置集中到一个页面里，便于交接和部署。</p>
       <div class="doc-grid">
         <article class="doc">
           <h3>API 文档</h3>
-          <p><strong>1.</strong> 健康检查：<code>GET /health</code></p>
-          <p><strong>2.</strong> 用量查询：<code>GET /tencent/quota</code></p>
-          <p><strong>3.</strong> 通用转文字：<code>POST /transcribe</code>（音频 / 图片统一入口）</p>
+          <ul class="doc-list">
+            <li>健康检查：<code>GET /health</code></li>
+            <li>用量查询：<code>GET /tencent/quota</code></li>
+            <li>通用转文字：<code>POST /transcribe</code>（音频 / 图片统一入口）</li>
+          </ul>
           <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -481,10 +779,13 @@ curl --noproxy '*' -s \
         </article>
         <article class="doc">
           <h3>配置注册文档</h3>
-          <p><strong>1.</strong> 从模板复制配置：</p>
+          <ul class="doc-list">
+            <li>从模板复制配置文件。</li>
+            <li>在 <code>asr.tencent.accounts</code> 中配置多个腾讯账号，语音转写和图片 OCR 会复用这组密钥。</li>
+            <li>免费测试号如果是“每月免费 10 小时”，填 <code>monthly_quota_seconds: 36000</code>。</li>
+            <li>服务默认轮询账号；如果请求里带单次密钥，则单次密钥优先。</li>
+          </ul>
           <pre>cp transcribe_config.template.json transcribe_config.json</pre>
-          <p><strong>2.</strong> 在 <code>asr.tencent.accounts</code> 里配置多个腾讯账号，语音转写和图片 OCR 都会复用这组腾讯密钥。</p>
-          <p><strong>3.</strong> 每个账号建议填写。你现在这类测试号如果是“每月免费 10 小时”，就填 <code>monthly_quota_seconds: 36000</code>：</p>
           <pre>{
   "name": "account-1",
   "secret_id": "AKIDxxxxx",
@@ -492,7 +793,6 @@ curl --noproxy '*' -s \
   "region": "ap-beijing",
   "monthly_quota_seconds": 36000
 }</pre>
-          <p><strong>4.</strong> 服务默认会按账号轮询；若请求里显式传了单次密钥，则单次密钥优先。</p>
         </article>
       </div>
     </section>
@@ -561,18 +861,18 @@ curl --noproxy '*' -s \
         return `
           <article class="account">
             <div class="account-head">
-              <div>
-                <div style="font-size: 20px; font-weight: 700;">${account.name}</div>
-                <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">${account.secret_id_masked} · ${account.region}</div>
+              <div class="account-title">
+                <div class="account-name">${account.name}</div>
+                <div class="account-subtitle">${account.secret_id_masked} · ${account.region}</div>
               </div>
               <span class="pill ${pillClass}">${quota > 0 ? quotaText : 'Usage Only'}</span>
             </div>
             <div class="meter"><span style="width:${ratio}%;"></span></div>
             <div class="meta">
-              <div>已用小时：${fmtHours(account.used_duration_hours)}</div>
-              <div>调用次数：${fmtNumber(account.used_count || 0)}</div>
-              <div>查询地域：${account.usage_region || '-'}</div>
-              <div>业务：${(account.biz_names || []).join(', ') || '-'}</div>
+              <div><strong>已用小时</strong>${fmtHours(account.used_duration_hours)}</div>
+              <div><strong>调用次数</strong>${fmtNumber(account.used_count || 0)}</div>
+              <div><strong>查询地域</strong>${account.usage_region || '-'}</div>
+              <div><strong>业务类型</strong>${(account.biz_names || []).join(', ') || '-'}</div>
             </div>
             ${errorBlock}
           </article>
@@ -592,23 +892,23 @@ curl --noproxy '*' -s \
     function renderOcrAccounts(accounts) {
       ocrAccountCards.innerHTML = accounts.map((account) => {
         const interfaces = (account.interfaces || []).map((item) => {
-          return `<div>${item.interface_name || item.interface_en_name || '-'}：${fmtNumber(item.call_count)} 次</div>`;
+          return `<div><strong>${item.interface_name || item.interface_en_name || '-'}</strong><span>${fmtNumber(item.call_count)} 次</span></div>`;
         }).join('') || '<div>暂无官方 OCR 调用记录</div>';
         const errorBlock = account.error ? `<div class="status-line error">${account.error}</div>` : '';
         return `
           <article class="account">
             <div class="account-head">
-              <div>
-                <div style="font-size: 20px; font-weight: 700;">${account.name}</div>
-                <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">${account.secret_id_masked} · ${account.region}</div>
+              <div class="account-title">
+                <div class="account-name">${account.name}</div>
+                <div class="account-subtitle">${account.secret_id_masked} · ${account.region}</div>
               </div>
               <span class="pill ${Number(account.call_count || 0) > 0 ? 'good' : 'warn'}">${fmtNumber(account.call_count || 0)} 次</span>
             </div>
             <div class="meta">
-              <div>成功：${fmtNumber(account.success_count || 0)}</div>
-              <div>失败：${fmtNumber(account.fail_count || 0)}</div>
-              <div>计费：${fmtNumber(account.billed_count || 0)}</div>
-              <div>子账号：${(account.sub_uins || []).join(', ') || '-'}</div>
+              <div><strong>成功次数</strong>${fmtNumber(account.success_count || 0)}</div>
+              <div><strong>失败次数</strong>${fmtNumber(account.fail_count || 0)}</div>
+              <div><strong>计费次数</strong>${fmtNumber(account.billed_count || 0)}</div>
+              <div><strong>子账号</strong>${(account.sub_uins || []).join(', ') || '-'}</div>
             </div>
             <div class="query-meta" style="margin-top: 14px;">
               <h3 style="margin: 0 0 10px; font-size: 15px;">接口明细</h3>
