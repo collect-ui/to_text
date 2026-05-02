@@ -148,6 +148,7 @@ SERVICE_NAME=to-text ./scripts/install_systemd_service.sh
 - 默认目录：`./cache/transcribe_result`
 - 默认策略：LRU，最多 `500` 条且最多 `200MB`（任一超限都会淘汰最久未访问项）
 - `raw=true` 时会返回 `cache_hit: true|false`
+- 下载前会先做快速可达性预检（默认约 `3` 秒），无效/不可达 URL 会更快返回，避免长时间卡在下载超时
 
 可通过参数调整：
 - `--cache-dir`
@@ -206,6 +207,8 @@ export ADMIN_TOKEN='change-this-token'
 
 说明：
 - 配了 `accounts` 后，腾讯转写会按账号轮询
+- 请求体可选传 `allow: ["account-1", "account-2"]`，只在白名单账号内负载；不传时仍使用全部账号池
+- URL 下载超时时会返回成功态文本 `超时`，并写入结果缓存，避免同 URL 每次重复下载
 - 如果单次请求显式传了 `tencent_secret_id` / `tencent_secret_key`，仍然优先走请求内密钥
 - `monthly_quota_seconds` 是本地配置额度，不是腾讯云接口直接返回字段
 - 待审核申请落在 `tencent_account_requests.json`，与运行配置文件分开保存
@@ -218,6 +221,7 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
   -d '{
     "url": "https://example.com/demo.mp3",
     "asr_provider": "tencent",
+    "allow": ["account-1", "account-2"],
     "raw": true
   }'
 ```

@@ -51,6 +51,18 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
   }'
 ```
 
+腾讯账号白名单负载（仅在指定账号里轮询/按剩余额度选择）：
+```bash
+curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.mp3",
+    "asr_provider": "tencent",
+    "allow": ["account-1", "account-2"],
+    "raw": true
+  }'
+```
+
 缓存命中验证（第二次同 URL 请求应返回 `cache_hit=true`）：
 ```bash
 curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
@@ -76,6 +88,10 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
 - 同一个图片 URL 如果 OCR 失败过 1 次，后续请求会直接返回成功态的 `未知`
 - 这样客户端不会继续对同一张图反复重试
 - 一旦后续该 URL OCR 成功，失败计数会自动清零
+
+下载超时兜底（音频 / 图片）：
+- 如果 URL 下载超时，接口会返回成功态文本 `超时`（`status=ok`，`text=超时`）
+- 该结果会进入 URL 结果缓存；同 URL 后续请求会直接命中缓存，不会每次都重新下载
 
 默认返回为业务封装结构：
 ```json
@@ -127,9 +143,13 @@ curl -s -X POST 'http://127.0.0.1:8014/transcribe' \
 - `raw`：`true` 时返回原始结构
 - `audio_chunk_seconds`：音频分段秒数；`0` 为不分段（默认）
 - `asr_provider`：`local|tencent`，默认读取运行时配置 `transcribe_config.json`（模板文件为 `transcribe_config.template.json`）
+- `download_timeout`：远程文件下载超时秒数；默认 `60`，最大 `60`（超过会按 `60` 处理）
+- 下载前会做一次快速可达性预检（默认约 `3` 秒）；URL 不可达会优先快速返回超时兜底，而不是长时间等待
 - `cache_hit`（响应字段，仅 `raw=true` 时可见）：是否命中本地缓存
+- `download_timeout`（响应字段，仅 `raw=true` 可能出现）：URL 下载是否触发超时兜底
 - `tencent_secret_id` / `tencent_secret_key`：单次请求覆盖腾讯云密钥
 - `asr.tencent.accounts`：服务级多账号池，未显式传单次密钥时按账号轮询
+- `allow`：可选，账号名数组。传了就只在这些账号里负载；不传则按全部账号池负载
 - `tencent_region`：默认 `ap-beijing`
 - 图片 OCR 默认也复用上述腾讯密钥与区域配置
 - `tencent_engine_model_type`：默认 `16k_zh`

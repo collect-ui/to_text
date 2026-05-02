@@ -5,6 +5,7 @@
 import argparse
 import base64
 import copy
+import concurrent.futures
 import datetime
 import hashlib
 import hmac
@@ -12,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -64,6 +66,11 @@ DEFAULT_RESULT_CACHE_MAX_ENTRIES = 500
 DEFAULT_RESULT_CACHE_MAX_SIZE_MB = 200
 DEFAULT_REQUEST_STORE_FILE = SCRIPT_DIR / 'tencent_account_requests.json'
 DEFAULT_OCR_FAILURE_THRESHOLD = 1
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 60
+MAX_DOWNLOAD_TIMEOUT_SECONDS = 60
+DEFAULT_DOWNLOAD_FIRST_BYTE_TIMEOUT_SECONDS = 10
+DEFAULT_DOWNLOAD_PRECHECK_TIMEOUT_SECONDS = 3
+DEFAULT_DOWNLOAD_FAILURE_THRESHOLD = 3
 TENCENT_ASR_ENDPOINT = 'https://asr.tencentcloudapi.com'
 TENCENT_ASR_VERSION = '2019-06-14'
 TENCENT_OCR_ENDPOINT = 'https://ocr.tencentcloudapi.com'
@@ -72,10 +79,15 @@ TENCENT_OCR_USAGE_TIME_GRANULARITY_DAY = 86400
 TENCENT_USAGE_REGION_FALLBACKS = ('ap-guangzhou', 'ap-shanghai', 'ap-beijing')
 TENCENT_USAGE_CACHE_TTL_SECONDS = 300
 TENCENT_SELECTION_RESERVATION_SECONDS = 180
+TENCENT_USAGE_QUERY_MAX_WORKERS = 8
 REQUEST_STATUS_PENDING = 'pending'
 REQUEST_STATUS_APPROVED = 'approved'
 REQUEST_STATUS_REJECTED = 'rejected'
 REQUEST_STATUS_UNDONE = 'undone'
+
+
+class DownloadTimeoutError(TimeoutError):
+    """Raised when URL download exceeds timeout."""
 
 
 def _read_json_file(path: Path, default: dict) -> dict:
@@ -106,6 +118,13 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value or 0)
     except Exception:
         return default
+
+
+def _clamp_download_timeout_seconds(value: object, default: int = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS) -> int:
+    timeout = _safe_int(value, default)
+    if timeout <= 0:
+        timeout = default
+    return min(timeout, MAX_DOWNLOAD_TIMEOUT_SECONDS)
 
 
 def _deep_update(dst: dict, src: dict) -> dict:
@@ -163,6 +182,29 @@ def _seconds_to_hours(seconds: int | float) -> float:
     return round(float(seconds or 0) / 3600.0, 2)
 
 
+def _normalize_allow_account_names(raw_allow: object) -> list[str] | None:
+    if raw_allow is None:
+        return None
+    if not isinstance(raw_allow, list):
+        raise ValueError('Invalid allow: expected array of account names')
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_allow:
+        name = str(item or '').strip()
+        if not name:
+            continue
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(name)
+
+    if not normalized:
+        raise ValueError('Invalid allow: at least one non-empty account name is required')
+    return normalized
+
+
 def _normalize_tencent_accounts(raw_accounts: object, fallback_account: dict) -> list[dict]:
     accounts: list[dict] = []
     if isinstance(raw_accounts, list):
@@ -203,10 +245,31 @@ class TencentCredentialPool:
         self._usage_cache_at = 0.0
         self._virtual_remaining: dict[str, int] = {}
 
-    def next_account(self) -> dict | None:
+    def _filter_accounts_by_allow_locked(self, allow_account_names: list[str] | None) -> list[dict]:
+        if allow_account_names is None:
+            return list(self._accounts)
+
+        allow_lookup = {
+            str(name or '').strip().lower()
+            for name in allow_account_names
+            if str(name or '').strip()
+        }
+        if not allow_lookup:
+            return []
+
+        return [
+            account for account in self._accounts
+            if str(account.get('name') or '').strip().lower() in allow_lookup
+        ]
+
+    def next_account(self, allow_account_names: list[str] | None = None) -> dict | None:
         if not self._accounts:
             return None
         with self._lock:
+            candidate_accounts = self._filter_accounts_by_allow_locked(allow_account_names)
+            if not candidate_accounts:
+                return None
+
             usage_summary = self._refresh_usage_cache_locked()
             usage_map = {
                 str(item.get('name') or ''): item
@@ -214,16 +277,17 @@ class TencentCredentialPool:
                 if isinstance(item, dict)
             } if isinstance(usage_summary, dict) else {}
 
-            quota_ready = all(int(account.get('monthly_quota_seconds') or 0) > 0 for account in self._accounts)
-            if quota_ready and len(usage_map) == len(self._accounts):
+            quota_ready = all(int(account.get('monthly_quota_seconds') or 0) > 0 for account in candidate_accounts)
+            candidate_names = [str(account.get('name') or '') for account in candidate_accounts]
+            if quota_ready and all(name in usage_map for name in candidate_names):
                 ranked: list[tuple[int, int, dict]] = []
-                for idx, account in enumerate(self._accounts):
+                for idx, account in enumerate(candidate_accounts):
                     name = str(account.get('name') or '')
                     usage = usage_map.get(name, {})
                     remaining = int(usage.get('remaining_quota_seconds') or 0)
                     if name not in self._virtual_remaining:
                         self._virtual_remaining[name] = remaining
-                    ranked.append((self._virtual_remaining[name], -((self._cursor + idx) % len(self._accounts)), account))
+                    ranked.append((self._virtual_remaining[name], -((self._cursor + idx) % len(candidate_accounts)), account))
                 ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
                 selected = dict(ranked[0][2])
                 selected_name = str(selected.get('name') or '')
@@ -233,11 +297,11 @@ class TencentCredentialPool:
                 )
                 selected['_selection_strategy'] = 'highest_remaining_quota'
                 selected['_selection_remaining_quota_seconds'] = int(self._virtual_remaining.get(selected_name, 0))
-                self._cursor = (self._cursor + 1) % len(self._accounts)
+                self._cursor = (self._cursor + 1) % max(1, len(self._accounts))
                 return selected
 
-            account = dict(self._accounts[self._cursor % len(self._accounts)])
-            self._cursor = (self._cursor + 1) % len(self._accounts)
+            account = dict(candidate_accounts[self._cursor % len(candidate_accounts)])
+            self._cursor = (self._cursor + 1) % max(1, len(self._accounts))
             account['_selection_strategy'] = 'round_robin'
             return account
 
@@ -405,7 +469,77 @@ def resolve_model_path(model_name_or_path: str, base_dir: Path) -> str:
     return model_name_or_path
 
 
-def stream_download(url: str, target: Path) -> str:
+def _is_timeout_error(err: Exception) -> bool:
+    if isinstance(err, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(err, URLError):
+        reason = getattr(err, 'reason', None)
+        if isinstance(reason, Exception):
+            return _is_timeout_error(reason)
+        if reason is not None and 'timed out' in str(reason).lower():
+            return True
+    lowered = str(err).lower()
+    return 'timed out' in lowered or 'timeout' in lowered
+
+
+def _set_response_socket_timeout(response: object, timeout_seconds: int) -> None:
+    # urllib wraps socket under response.fp.raw._sock on CPython.
+    try:
+        fp = getattr(response, 'fp', None)
+        raw = getattr(fp, 'raw', None)
+        sock = getattr(raw, '_sock', None)
+        if sock is not None:
+            sock.settimeout(float(timeout_seconds))
+    except Exception:
+        pass
+
+
+def _precheck_download(url: str, headers: Dict[str, str], timeout_seconds: int) -> None:
+    """Fail fast when remote URL is not reachable before full download."""
+    timeout_seconds = max(1, int(timeout_seconds))
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {'http', 'https'}:
+        return
+
+    def _request_or_timeout(req: Request) -> None:
+        try:
+            with urlopen(req, timeout=timeout_seconds) as response:
+                _set_response_socket_timeout(response, timeout_seconds)
+        except (TimeoutError, socket.timeout) as err:
+            raise DownloadTimeoutError(
+                f'download precheck timeout ({timeout_seconds}s): {err}'
+            ) from err
+        except URLError as err:
+            if _is_timeout_error(err):
+                raise DownloadTimeoutError(
+                    f'download precheck timeout ({timeout_seconds}s): {err}'
+                ) from err
+            raise
+
+    head_req = Request(url, headers=headers, method='HEAD')
+    try:
+        _request_or_timeout(head_req)
+        return
+    except HTTPError as err:
+        # Some providers do not allow HEAD requests, so fallback to range GET.
+        if err.code not in {405, 501}:
+            raise
+
+    range_headers = dict(headers)
+    range_headers['Range'] = 'bytes=0-0'
+    range_req = Request(url, headers=range_headers, method='GET')
+    try:
+        _request_or_timeout(range_req)
+    except HTTPError as err:
+        # 416 can happen for zero-byte files but still proves endpoint is reachable.
+        if err.code != 416:
+            raise
+
+
+def stream_download(url: str, target: Path, timeout_seconds: int = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS) -> str:
+    timeout_seconds = _clamp_download_timeout_seconds(timeout_seconds)
+    probe_timeout_seconds = min(timeout_seconds, DEFAULT_DOWNLOAD_FIRST_BYTE_TIMEOUT_SECONDS)
+    precheck_timeout_seconds = min(probe_timeout_seconds, DEFAULT_DOWNLOAD_PRECHECK_TIMEOUT_SECONDS)
     headers = {
         'User-Agent': 'Mozilla/5.0 (compatible; transcribe-script/1.0)',
         'Accept': '*/*',
@@ -413,16 +547,32 @@ def stream_download(url: str, target: Path) -> str:
     }
     last_err: Exception | None = None
     max_attempts = 3
+    _precheck_download(url, headers, precheck_timeout_seconds)
 
     for attempt in range(1, max_attempts + 1):
         req = Request(url, headers=headers)
+        attempt_bytes = 0
         try:
-            with urlopen(req, timeout=60) as response, target.open('wb') as out_file:
+            with urlopen(req, timeout=probe_timeout_seconds) as response, target.open('wb') as out_file:
                 content_type = response.headers.get('Content-Type', '')
+                _set_response_socket_timeout(response, probe_timeout_seconds)
+                first_chunk = response.read(1024 * 1024)
+                if not first_chunk:
+                    if attempt >= max_attempts:
+                        raise DownloadTimeoutError(
+                            f'download failed: no bytes received after {max_attempts} attempts '
+                            f'(probe={probe_timeout_seconds}s, total={timeout_seconds}s)'
+                        )
+                    time.sleep(0.3 * attempt)
+                    continue
+                attempt_bytes += len(first_chunk)
+                out_file.write(first_chunk)
+                _set_response_socket_timeout(response, timeout_seconds)
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         return content_type
+                    attempt_bytes += len(chunk)
                     out_file.write(chunk)
         except HTTPError as err:
             last_err = err
@@ -430,8 +580,26 @@ def stream_download(url: str, target: Path) -> str:
             if err.code < 500 or attempt >= max_attempts:
                 raise
             time.sleep(0.8 * attempt)
+        except (TimeoutError, socket.timeout) as err:
+            if attempt < max_attempts and attempt_bytes == 0:
+                # When no byte is received, retry quickly instead of waiting full timeout.
+                last_err = err
+                time.sleep(0.3 * attempt)
+                continue
+            raise DownloadTimeoutError(
+                f'download timeout (probe={probe_timeout_seconds}s, total={timeout_seconds}s, '
+                f'attempt={attempt}, bytes={attempt_bytes}): {err}'
+            ) from err
         except URLError as err:
             last_err = err
+            if _is_timeout_error(err):
+                if attempt < max_attempts and attempt_bytes == 0:
+                    time.sleep(0.3 * attempt)
+                    continue
+                raise DownloadTimeoutError(
+                    f'download timeout (probe={probe_timeout_seconds}s, total={timeout_seconds}s, '
+                    f'attempt={attempt}, bytes={attempt_bytes}): {err}'
+                ) from err
             if attempt >= max_attempts:
                 raise
             time.sleep(0.8 * attempt)
@@ -667,10 +835,10 @@ def summarize_tencent_usage(accounts: list[dict],
                             end_date: str,
                             biz_names: list[str] | None = None) -> dict:
     requested_biz_names = biz_names or ['asr_rec']
-    items: list[dict] = []
     total_duration = 0
     total_count = 0
-    for idx, account in enumerate(accounts):
+
+    def _query_account_usage(idx: int, account: dict) -> tuple[int, dict, int, int]:
         current = {
             'name': account.get('name') or f'account-{idx + 1}',
             'secret_id_masked': _mask_secret(str(account.get('secret_id') or '')),
@@ -681,6 +849,8 @@ def summarize_tencent_usage(accounts: list[dict],
             'end_date': end_date,
             'biz_names': requested_biz_names,
         }
+        used_duration = 0
+        used_count = 0
         try:
             resp, used_region = get_tencent_usage_by_date_with_fallback(
                 secret_id=str(account.get('secret_id') or ''),
@@ -701,11 +871,27 @@ def summarize_tencent_usage(accounts: list[dict],
             if current['monthly_quota_seconds'] > 0:
                 current['remaining_quota_seconds'] = max(0, current['monthly_quota_seconds'] - used_duration)
                 current['remaining_quota_hours'] = _seconds_to_hours(current['remaining_quota_seconds'])
-            total_duration += used_duration
-            total_count += used_count
         except Exception as exc:
             current['error'] = str(exc)
-        items.append(current)
+        return idx, current, used_duration, used_count
+
+    results: list[tuple[int, dict, int, int]] = []
+    worker_count = _resolve_parallel_workers(len(accounts))
+    if worker_count == 1:
+        for idx, account in enumerate(accounts):
+            results.append(_query_account_usage(idx, account))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(_query_account_usage, idx, account) for idx, account in enumerate(accounts)]
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+
+    items: list[dict] = [dict() for _ in accounts]
+    for idx, current, used_duration, used_count in sorted(results, key=lambda item: item[0]):
+        items[idx] = current
+        total_duration += used_duration
+        total_count += used_count
+
     return {
         'status': 'ok',
         'start_date': start_date,
@@ -756,18 +942,23 @@ def _sum_numeric_list(values: object) -> int:
     return total
 
 
+def _resolve_parallel_workers(task_count: int, limit: int = TENCENT_USAGE_QUERY_MAX_WORKERS) -> int:
+    if task_count <= 0:
+        return 1
+    return max(1, min(task_count, max(1, limit)))
+
+
 def summarize_tencent_ocr_usage(accounts: list[dict],
                                 start_date: str,
                                 end_date: str) -> dict:
     start_time = f'{start_date} 00:00:00'
     end_time = f'{end_date} 23:59:59'
-    items: list[dict] = []
     total_call_count = 0
     total_success_count = 0
     total_fail_count = 0
     total_billed_count = 0
 
-    for idx, account in enumerate(accounts):
+    def _query_account_ocr_usage(idx: int, account: dict) -> tuple[int, dict, int, int, int, int]:
         current = {
             'name': account.get('name') or f'account-{idx + 1}',
             'secret_id_masked': _mask_secret(str(account.get('secret_id') or '')),
@@ -777,6 +968,10 @@ def summarize_tencent_ocr_usage(accounts: list[dict],
             'start_time': start_time,
             'end_time': end_time,
         }
+        account_call_count = 0
+        account_success_count = 0
+        account_fail_count = 0
+        account_billed_count = 0
         try:
             resp = query_tencent_ocr_call_for_console(
                 secret_id=str(account.get('secret_id') or ''),
@@ -788,10 +983,6 @@ def summarize_tencent_ocr_usage(accounts: list[dict],
             body = resp.get('Response') or {}
             detail_list = body.get('CallDetailList') or []
             interface_map: dict[tuple[str, str], dict] = {}
-            account_call_count = 0
-            account_success_count = 0
-            account_fail_count = 0
-            account_billed_count = 0
             for item in detail_list:
                 if not isinstance(item, dict):
                     continue
@@ -825,13 +1016,35 @@ def summarize_tencent_ocr_usage(accounts: list[dict],
             current['fail_count'] = account_fail_count
             current['billed_count'] = account_billed_count
             current['request_id'] = body.get('RequestId')
-            total_call_count += account_call_count
-            total_success_count += account_success_count
-            total_fail_count += account_fail_count
-            total_billed_count += account_billed_count
         except Exception as exc:
             current['error'] = str(exc)
-        items.append(current)
+        return (
+            idx,
+            current,
+            account_call_count,
+            account_success_count,
+            account_fail_count,
+            account_billed_count,
+        )
+
+    results: list[tuple[int, dict, int, int, int, int]] = []
+    worker_count = _resolve_parallel_workers(len(accounts))
+    if worker_count == 1:
+        for idx, account in enumerate(accounts):
+            results.append(_query_account_ocr_usage(idx, account))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(_query_account_ocr_usage, idx, account) for idx, account in enumerate(accounts)]
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+
+    items: list[dict] = [dict() for _ in accounts]
+    for idx, current, call_count, success_count, fail_count, billed_count in sorted(results, key=lambda item: item[0]):
+        items[idx] = current
+        total_call_count += call_count
+        total_success_count += success_count
+        total_fail_count += fail_count
+        total_billed_count += billed_count
 
     return {
         'status': 'ok',
@@ -1092,6 +1305,68 @@ def detect_task(url: str, content_type: str, explicit_task: str, local_path: Pat
     return 'audio'
 
 
+def infer_task_without_download(url: str, explicit_task: str) -> Literal['audio', 'image']:
+    task = str(explicit_task or '').strip().lower()
+    if task == 'image':
+        return 'image'
+    if task == 'audio':
+        return 'audio'
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if suffix in IMAGE_EXTS:
+        return 'image'
+    return 'audio'
+
+
+def build_download_timeout_result(url: str,
+                                  task: str,
+                                  language: str | None,
+                                  source_path: Path,
+                                  err: Exception) -> Dict:
+    model_name = 'image-ocr' if task == 'image' else 'unknown'
+    return {
+        'url': url,
+        'status': 'ok',
+        'task': task,
+        'text': '超时',
+        'language': language,
+        'duration': None,
+        'engine': 'download-timeout-fallback',
+        'model': model_name,
+        'model_path': None,
+        'transcription_source': str(source_path),
+        'cache_hit': False,
+        'download_timeout': True,
+        'download_timeout_error': str(err),
+    }
+
+
+def build_download_failure_result(url: str,
+                                  task: str,
+                                  language: str | None,
+                                  source_path: Path | None,
+                                  err: Exception,
+                                  failure_count: int,
+                                  from_failure_cache: bool = False) -> Dict:
+    model_name = 'image-ocr' if task == 'image' else 'unknown'
+    return {
+        'url': url,
+        'status': 'ok',
+        'task': task,
+        'text': '下载失败',
+        'language': language,
+        'duration': None,
+        'engine': 'download-failure-fallback',
+        'model': model_name,
+        'model_path': None,
+        'transcription_source': str(source_path) if source_path is not None else '',
+        'cache_hit': False,
+        'download_failed': True,
+        'download_failure_count': failure_count,
+        'download_failure_error': str(err),
+        'download_failure_cached': bool(from_failure_cache),
+    }
+
+
 def looks_like_image(path: Path) -> bool:
     try:
         with path.open('rb') as f:
@@ -1108,6 +1383,22 @@ def looks_like_image(path: Path) -> bool:
     if head.startswith(b'RIFF') and head[8:12] == b'WEBP':
         return True
     return False
+
+
+def looks_like_html_payload(path: Path) -> bool:
+    try:
+        with path.open('rb') as f:
+            head = f.read(256).lstrip()
+    except Exception:
+        return False
+
+    lowered = head.lower()
+    return (
+        lowered.startswith(b'<!doctype html')
+        or lowered.startswith(b'<html')
+        or lowered.startswith(b'<head')
+        or lowered.startswith(b'<body')
+    )
 
 
 def extract_text_with_openai(url: str, model: str, api_key: str,
@@ -1235,7 +1526,8 @@ def extract_text_with_tencent(path: Path,
 def _select_tencent_credential_for_ocr(tencent_secret_id: str,
                                        tencent_secret_key: str,
                                        tencent_region: str,
-                                       tencent_account_pool: TencentCredentialPool | None) -> tuple[str, str, str, dict | None]:
+                                       tencent_account_pool: TencentCredentialPool | None,
+                                       allow_account_names: list[str] | None = None) -> tuple[str, str, str, dict | None]:
     effective_secret_id = (tencent_secret_id or '').strip()
     effective_secret_key = (tencent_secret_key or '').strip()
     effective_region = (tencent_region or 'ap-beijing').strip()
@@ -1243,7 +1535,7 @@ def _select_tencent_credential_for_ocr(tencent_secret_id: str,
     if effective_secret_id and effective_secret_key:
         return effective_secret_id, effective_secret_key, effective_region, selected_account
     if tencent_account_pool is not None:
-        selected_account = tencent_account_pool.next_account()
+        selected_account = tencent_account_pool.next_account(allow_account_names)
         if selected_account is not None:
             effective_secret_id = str(selected_account.get('secret_id') or '').strip()
             effective_secret_key = str(selected_account.get('secret_key') or '').strip()
@@ -1257,7 +1549,8 @@ def extract_text_from_image(path: Path, url: str, provider: str,
                            tencent_secret_id: str,
                            tencent_secret_key: str,
                            tencent_region: str,
-                           tencent_account_pool: TencentCredentialPool | None) -> tuple[str, str, dict]:
+                           tencent_account_pool: TencentCredentialPool | None,
+                           allow_account_names: list[str] | None = None) -> tuple[str, str, dict]:
     provider = (provider or 'auto').lower()
     ai_api_key = (ai_api_key or '').strip()
     local_text = ''
@@ -1270,6 +1563,7 @@ def extract_text_from_image(path: Path, url: str, provider: str,
             tencent_secret_key,
             tencent_region,
             tencent_account_pool,
+            allow_account_names,
         )
         try:
             text, tencent_meta = extract_text_with_tencent(
@@ -1660,20 +1954,114 @@ def transcribe_url(url: str,
                    ai_endpoint: str,
                    ai_timeout: int,
                    ai_api_key: str | None,
+                   download_timeout_seconds: int,
+                   allow_account_names: list[str] | None = None,
                    result_cache: ResultCache | None = None) -> Dict:
+    inferred_task = infer_task_without_download(url, task)
+    download_failure_task = f'download:{inferred_task}'
+
     if result_cache is not None:
         cached = result_cache.get(url)
         if cached is not None:
             cache_result = dict(cached)
             cache_result['cache_hit'] = True
             return cache_result
+        try:
+            download_failure_count = result_cache.get_failure_count(url, download_failure_task)
+        except Exception:
+            download_failure_count = 0
+        if download_failure_count >= DEFAULT_DOWNLOAD_FAILURE_THRESHOLD:
+            fallback_err = RuntimeError(
+                f'download skipped after {download_failure_count} consecutive failures'
+            )
+            fallback_result = build_download_failure_result(
+                url=url,
+                task=inferred_task,
+                language=language,
+                source_path=None,
+                err=fallback_err,
+                failure_count=download_failure_count,
+                from_failure_cache=True,
+            )
+            try:
+                result_cache.put(url, fallback_result)
+            except Exception:
+                pass
+            return fallback_result
 
     suffix = Path(urlparse(url).path).suffix or '.audio'
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
 
     try:
-        content_type = stream_download(url, tmp_path)
+        try:
+            content_type = stream_download(url, tmp_path, timeout_seconds=download_timeout_seconds)
+        except DownloadTimeoutError as err:
+            download_failure_count = 0
+            if result_cache is not None:
+                try:
+                    download_failure_count = result_cache.record_failure(url, download_failure_task)
+                except Exception:
+                    download_failure_count = 0
+            timeout_task = infer_task_without_download(url, task)
+            timeout_result = build_download_timeout_result(
+                url=url,
+                task=timeout_task,
+                language=language,
+                source_path=tmp_path,
+                err=err,
+            )
+            if download_failure_count > 0:
+                timeout_result['download_failure_count'] = download_failure_count
+            if result_cache is not None:
+                if download_failure_count >= DEFAULT_DOWNLOAD_FAILURE_THRESHOLD:
+                    timeout_result['download_failure_cached'] = True
+                    try:
+                        result_cache.put(url, timeout_result)
+                    except Exception:
+                        pass
+            return timeout_result
+        except Exception as err:
+            download_failure_count = 0
+            if result_cache is not None:
+                try:
+                    download_failure_count = result_cache.record_failure(url, download_failure_task)
+                except Exception:
+                    download_failure_count = 0
+            if result_cache is not None and download_failure_count >= DEFAULT_DOWNLOAD_FAILURE_THRESHOLD:
+                fallback_result = build_download_failure_result(
+                    url=url,
+                    task=inferred_task,
+                    language=language,
+                    source_path=tmp_path,
+                    err=err,
+                    failure_count=download_failure_count,
+                    from_failure_cache=True,
+                )
+                try:
+                    result_cache.put(url, fallback_result)
+                except Exception:
+                    pass
+                return fallback_result
+            raise
+
+        lowered_content_type = (content_type or '').lower()
+        if 'text/html' in lowered_content_type or looks_like_html_payload(tmp_path):
+            return {
+                'url': url,
+                'status': 'ok',
+                'task': 'unknown',
+                'text': '未知',
+                'language': language,
+                'duration': None,
+                'engine': 'download-fallback',
+                'model': 'unknown',
+                'model_path': None,
+                'transcription_source': str(tmp_path),
+                'cache_hit': False,
+                'download_content_type': content_type,
+                'download_warning': 'downloaded payload is html, not media',
+            }
         resolved_task = detect_task(url, content_type, task, tmp_path)
 
         if resolved_task == 'image':
@@ -1707,6 +2095,7 @@ def transcribe_url(url: str,
                     tencent_secret_key,
                     tencent_region,
                     tencent_account_pool,
+                    allow_account_names,
                 )
             except Exception:
                 failure_count = 0
@@ -1745,6 +2134,7 @@ def transcribe_url(url: str,
             result.update(image_meta)
             if result_cache is not None:
                 try:
+                    result_cache.clear_failures(url, download_failure_task)
                     result_cache.put(url, result)
                 except Exception:
                     pass
@@ -1756,11 +2146,16 @@ def transcribe_url(url: str,
             effective_secret_key = tencent_secret_key
             effective_region = tencent_region
             if not effective_secret_id or not effective_secret_key:
-                selected_account = tencent_account_pool.next_account() if tencent_account_pool is not None else None
+                selected_account = (
+                    tencent_account_pool.next_account(allow_account_names)
+                    if tencent_account_pool is not None else None
+                )
                 if selected_account is not None:
                     effective_secret_id = str(selected_account.get('secret_id') or '')
                     effective_secret_key = str(selected_account.get('secret_key') or '')
                     effective_region = str(selected_account.get('region') or effective_region or 'ap-beijing')
+            if (not effective_secret_id or not effective_secret_key) and allow_account_names:
+                raise RuntimeError(f'No Tencent account available in allow list: {", ".join(allow_account_names)}')
             result = transcribe_with_tencent(
                 url=url,
                 language=language,
@@ -1782,6 +2177,7 @@ def transcribe_url(url: str,
             )
             if result_cache is not None:
                 try:
+                    result_cache.clear_failures(url, download_failure_task)
                     result_cache.put(url, result)
                 except Exception:
                     pass
@@ -1849,6 +2245,7 @@ def transcribe_url(url: str,
         }
         if result_cache is not None:
             try:
+                result_cache.clear_failures(url, download_failure_task)
                 result_cache.put(url, result)
             except Exception:
                 pass
@@ -1925,6 +2322,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                         type=int,
                         default=int(os.getenv('OCR_TIMEOUT', '30')),
                         help='AI OCR request timeout seconds')
+    parser.add_argument('--download-timeout',
+                        type=int,
+                        default=int(os.getenv('DOWNLOAD_TIMEOUT_SECONDS', str(DEFAULT_DOWNLOAD_TIMEOUT_SECONDS))),
+                        help=f'Remote file download timeout seconds (max {MAX_DOWNLOAD_TIMEOUT_SECONDS})')
     parser.add_argument('--task', default='auto', choices=['auto', 'audio', 'image'],
                         help='Force task: auto detects by URL/media type')
     parser.add_argument('--no-vad', action='store_true', help='Disable VAD filter')
@@ -2073,6 +2474,7 @@ def run_transcribe_command(args: argparse.Namespace) -> int:
         ai_endpoint=args.ocr_api_endpoint,
         ai_timeout=args.ocr_timeout,
         ai_api_key=args.ocr_api_key,
+        download_timeout_seconds=args.download_timeout,
         result_cache=cache,
     )
 
@@ -2126,6 +2528,7 @@ def serve_command(args: argparse.Namespace) -> int:
         'ai_endpoint': args.ocr_api_endpoint,
         'ai_timeout': args.ocr_timeout,
         'ai_api_key': args.ocr_api_key,
+        'download_timeout': _clamp_download_timeout_seconds(args.download_timeout),
         'cache_enabled': cache is not None,
     }
 
@@ -2483,6 +2886,26 @@ def serve_command(args: argparse.Namespace) -> int:
                 return
 
             cfg = self.server_ctx['defaults']
+            if 'allow' in payload:
+                try:
+                    allow_account_names = _normalize_allow_account_names(payload.get('allow'))
+                except ValueError as exc:
+                    self._error(400, str(exc))
+                    return
+            else:
+                allow_account_names = None
+
+            if allow_account_names is not None:
+                configured_names = {
+                    str(item.get('name') or '').strip().lower()
+                    for item in (cfg.get('tencent_accounts') or [])
+                    if isinstance(item, dict) and str(item.get('name') or '').strip()
+                }
+                unknown_names = [name for name in allow_account_names if name.lower() not in configured_names]
+                if unknown_names:
+                    self._error(400, f'Unknown allow account(s): {", ".join(unknown_names)}')
+                    return
+
             req_lang = payload.get('language')
             lang = req_lang.strip() if isinstance(req_lang, str) else cfg['language']
             lang = lang or None
@@ -2506,6 +2929,16 @@ def serve_command(args: argparse.Namespace) -> int:
             if audio_chunk_seconds < 0:
                 self._error(400, 'Invalid audio_chunk_seconds')
                 return
+
+            try:
+                download_timeout = int(payload.get('download_timeout', cfg['download_timeout']))
+            except Exception:
+                self._error(400, 'Invalid download_timeout')
+                return
+            if download_timeout <= 0:
+                self._error(400, 'Invalid download_timeout')
+                return
+            download_timeout = min(download_timeout, MAX_DOWNLOAD_TIMEOUT_SECONDS)
 
             req = transcribe_url(
                 url=url,
@@ -2541,6 +2974,8 @@ def serve_command(args: argparse.Namespace) -> int:
                 ai_endpoint=payload.get('ocr_api_endpoint', cfg['ai_endpoint']),
                 ai_timeout=int(payload.get('ocr_timeout', cfg['ai_timeout'])),
                 ai_api_key=payload.get('ocr_api_key', cfg['ai_api_key']),
+                download_timeout_seconds=download_timeout,
+                allow_account_names=allow_account_names,
                 result_cache=self.server_ctx['result_cache'] if path == '/transcribe' else None,
             )
             req['duration_ms'] = int(req.get('duration', 0) * 1000) if req.get('duration') else 0
@@ -2590,16 +3025,23 @@ def serve_command(args: argparse.Namespace) -> int:
                     biz_names_raw = (params.get('biz_names') or ['asr_rec'])[0]
                     biz_names = [item.strip() for item in biz_names_raw.split(',') if item.strip()]
                     force_refresh = (params.get('refresh') or ['0'])[0] in {'1', 'true', 'yes'}
-                    if (
-                        pool is not None
-                        and start_date == datetime.date.today().replace(day=1).isoformat()
-                        and end_date == datetime.date.today().isoformat()
-                        and biz_names == ['asr_rec']
-                    ):
-                        summary = pool.quota_summary(force_refresh=force_refresh)
-                    else:
-                        summary = summarize_tencent_usage(accounts, start_date, end_date, biz_names)
-                    summary['ocr_usage'] = summarize_tencent_ocr_usage(accounts, start_date, end_date)
+
+                    def _fetch_asr_summary() -> dict:
+                        if (
+                            pool is not None
+                            and start_date == datetime.date.today().replace(day=1).isoformat()
+                            and end_date == datetime.date.today().isoformat()
+                            and biz_names == ['asr_rec']
+                        ):
+                            return pool.quota_summary(force_refresh=force_refresh)
+                        return summarize_tencent_usage(accounts, start_date, end_date, biz_names)
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                        asr_future = executor.submit(_fetch_asr_summary)
+                        ocr_future = executor.submit(summarize_tencent_ocr_usage, accounts, start_date, end_date)
+                        summary = asr_future.result()
+                        summary['ocr_usage'] = ocr_future.result()
+
                     self._json_resp(summary)
                     return
                 self._error(404, 'Not Found')
@@ -2702,6 +3144,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         '--ocr-model', args.ocr_model,
         '--ocr-api-key', args.ocr_api_key,
         '--ocr-timeout', str(args.ocr_timeout),
+        '--download-timeout', str(args.download_timeout),
         '--task', args.task,
         '--beam-size', str(args.beam_size),
         '--temperature', str(args.temperature),

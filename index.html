@@ -724,7 +724,7 @@
             </div>
             <div class="quick-item">
               <strong>统一转写</strong>
-              <p>音频和图片统一走 <code>POST /transcribe</code>，图片可自动识别，也可显式传 <code>task=image</code>。</p>
+              <p>音频和图片统一走 <code>POST /transcribe</code>，图片可自动识别，也可显式传 <code>task=image</code>。如需限制账号范围，可传 <code>allow</code> 白名单数组。</p>
             </div>
             <div class="quick-item">
               <strong>账号申请</strong>
@@ -780,11 +780,20 @@ curl --noproxy '*' -s \
             <li>密钥验证：<code>POST /tencent/account-credentials/validate</code>（管理员口令）</li>
             <li>提交申请：<code>POST /tencent/account-requests</code></li>
             <li>通用转文字：<code>POST /transcribe</code>（音频 / 图片统一入口）</li>
+            <li>白名单负载：请求体可传 <code>allow: ["account-1","account-2"]</code>，只在指定账号内选取。</li>
           </ul>
           <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
   -H 'Content-Type: application/json' \
   -d '{
     "url": "https://example.com/demo.mp3",
+    "raw": true
+  }'</pre>
+          <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/demo.mp3",
+    "asr_provider": "tencent",
+    "allow": ["account-1", "account-2"],
     "raw": true
   }'</pre>
           <pre>curl --noproxy '*' -X POST 'http://127.0.0.1:8014/transcribe' \
@@ -801,7 +810,8 @@ curl --noproxy '*' -s \
             <li>从模板复制配置文件。</li>
             <li>在 <code>asr.tencent.accounts</code> 中配置多个腾讯账号，语音转写和图片 OCR 会复用这组密钥。</li>
             <li>免费测试号如果是“每月免费 10 小时”，填 <code>monthly_quota_seconds: 36000</code>。</li>
-            <li>服务默认轮询账号；如果请求里带单次密钥，则单次密钥优先。</li>
+            <li>服务默认在账号池内负载；如果请求里带 <code>allow</code> 白名单，则只在白名单账号里负载。</li>
+            <li>如果请求里带单次密钥（<code>tencent_secret_id / tencent_secret_key</code>），则单次密钥优先。</li>
             <li>审批数据单独保存在本地 JSON；审核通过后才会改 <code>transcribe_config.json</code>。</li>
           </ul>
           <pre>cp transcribe_config.template.json transcribe_config.json</pre>
