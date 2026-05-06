@@ -347,7 +347,8 @@
     const globalStatusEl = document.getElementById('globalStatus');
     const directStatusEl = document.getElementById('directStatus');
 
-    adminTokenEl.value = localStorage.getItem('to_text_admin_token') || '';
+    const ADMIN_TOKEN_STORAGE_KEY = 'to_text_admin_token';
+    adminTokenEl.value = localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '';
 
     function adminHeaders() {
       return {
@@ -431,6 +432,7 @@
     }
 
     async function loadRequests() {
+      persistAdminToken(false);
       if (!adminTokenEl.value.trim()) {
         setStatus(globalStatusEl, '先输入管理口令，再刷新列表。', '');
         requestListEl.innerHTML = '<div class="status">等待管理口令。</div>';
@@ -478,6 +480,14 @@
         throw new Error(data.error || `HTTP ${response.status}`);
       }
       return data;
+    }
+
+    function persistAdminToken(showStatus = true) {
+      const token = adminTokenEl.value.trim();
+      localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token);
+      if (showStatus) {
+        setStatus(globalStatusEl, '管理口令已保存在当前浏览器。', 'ok');
+      }
     }
 
     requestListEl.addEventListener('click', async (event) => {
@@ -548,8 +558,17 @@
       loadRequests();
     });
     saveTokenBtn.addEventListener('click', () => {
-      localStorage.setItem('to_text_admin_token', adminTokenEl.value.trim());
-      setStatus(globalStatusEl, '管理口令已保存在当前浏览器。', 'ok');
+      persistAdminToken();
+    });
+    adminTokenEl.addEventListener('input', () => {
+      persistAdminToken(false);
+    });
+    adminTokenEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        persistAdminToken(false);
+        loadRequests();
+      }
     });
     statusFilterEl.addEventListener('change', loadRequests);
     accountNameMatchModeEl.addEventListener('change', loadRequests);
